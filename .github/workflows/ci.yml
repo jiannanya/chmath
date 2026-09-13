@@ -1,0 +1,45 @@
+name: C++20 validation
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        compiler: [clang++, g++]
+        exclude:
+          - os: macos-latest
+            compiler: g++
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test Debug, Release, scalar fallback
+        env:
+          CXX: ${{ matrix.compiler }}
+        run: sh scripts/validate.sh
+      - name: Audit 1000 compiled test cases
+        run: python3 scripts/test_inventory.py --build-dir build/validate-${{ matrix.compiler }}-Release
+      - run: python3 scripts/generate_extended_tests.py --check
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - run: ./scripts/validate.ps1 -Compiler cl
+      - run: ./scripts/validate.ps1 -Compiler clang++
+      - run: python scripts/test_inventory.py --build-dir build/validate-cl-Release
+      - run: python scripts/generate_extended_tests.py --check
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build/sanitize -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Debug -DCHMATH_SANITIZERS=ON
+      - run: cmake --build build/sanitize --parallel 4
+      - name: Address, undefined behavior and leak checks
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build/sanitize --output-on-failure --parallel 4

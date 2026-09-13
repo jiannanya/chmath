@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.20)
+project(chmath_consumer LANGUAGES CXX)
+find_package(chmath 2 CONFIG REQUIRED)
+add_executable(consumer main.cpp)
+target_link_libraries(consumer PRIVATE chm::chmath)
+set_target_properties(consumer PROPERTIES CXX_EXTENSIONS OFF)
+enable_testing()
+add_test(NAME consumer COMMAND consumer)

@@ -1,0 +1,7 @@
+/build/
+/out/
+/CMakeUserPresets.json
+*.profraw
+*.profdata
+.vs/
+docs/results/

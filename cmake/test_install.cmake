@@ -1,0 +1,21 @@
+# Test the exported package in a separate consumer project, without source include paths.
+set(prefix "${CHMATH_BINARY_DIR}/install-smoke/prefix")
+set(consumer "${CHMATH_BINARY_DIR}/install-smoke/consumer")
+function(checked)
+    execute_process(COMMAND ${ARGV} RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR "Command failed (${result}): ${ARGV}\n${output}\n${error}")
+    endif()
+endfunction()
+set(config_arguments "")
+set(test_config_arguments "")
+if(NOT "${CHMATH_CONFIG}" STREQUAL "")
+    list(APPEND config_arguments --config "${CHMATH_CONFIG}")
+    list(APPEND test_config_arguments -C "${CHMATH_CONFIG}")
+endif()
+checked("${CMAKE_COMMAND}" --install "${CHMATH_BINARY_DIR}" --prefix "${prefix}" ${config_arguments})
+checked("${CMAKE_COMMAND}" -S "${CHMATH_SOURCE_DIR}/tests/consumer" -B "${consumer}"
+    -G "${CHMATH_GENERATOR}" "-DCMAKE_PREFIX_PATH=${prefix}" "-DCMAKE_CXX_COMPILER=${CHMATH_CXX_COMPILER}"
+    "-DCMAKE_BUILD_TYPE=${CHMATH_CONFIG}")
+checked("${CMAKE_COMMAND}" --build "${consumer}" ${config_arguments})
+checked("${CMAKE_CTEST_COMMAND}" --test-dir "${consumer}" ${test_config_arguments} --output-on-failure)
