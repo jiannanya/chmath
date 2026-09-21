@@ -224,8 +224,10 @@ template <scalar T, std::size_t N>
 template <floating T, std::size_t N>
 [[nodiscard]] constexpr bool almost_equal(const vec<T, N> &a, const vec<T, N> &b,
                                           T rel = epsilon<T>, T abs = epsilon<T>) noexcept {
+    if (!tolerance_valid(rel, abs))
+        return false;
     for (std::size_t i = 0; i < N; ++i)
-        if (!almost_equal(a[i], b[i], rel, abs))
+        if (!detail::almost_equal_value(a[i], b[i], rel, abs))
             return false;
     return true;
 }

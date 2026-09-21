@@ -2,6 +2,7 @@
 #include <chmath/core/span.hpp>
 #include <chmath/geometry/frustum.hpp>
 #include <chmath/geometry/intersection.hpp>
+#include <chmath/parallel/parallel.hpp>
 
 namespace chm {
 // Owns its ray and cached reciprocals. Intended for many boxes sharing one ray;
@@ -94,6 +95,41 @@ template <floating T, class Shape>
         return false;
     for (std::size_t i = 0; i < input.size(); ++i)
         output[i] = classify(f, input[i]);
+    return true;
+}
+// Opt-in parallel overloads. The whole-batch contract is checked first, then
+// the query is split into independent cache-line-aligned ranges; see the note
+// in chmath/simd/batch.hpp for the exact guarantees. The interval endpoints are
+// explicit here so that the worker count is never confused with a t value.
+template <floating T, std::size_t N>
+[[nodiscard]] inline bool
+intersect_many(const prepared_ray<T, N> &r, std::span<const aabb<T, N>> boxes,
+               std::span<std::optional<ray_interval<T>>> output, T lo, T hi, unsigned workers) {
+    if (boxes.size() != output.size() || !detail::valid_interval(lo, hi) ||
+        detail::spans_overlap(boxes, output) ||
+        detail::spans_overlap(std::span<const prepared_ray<T, N>>{&r, 1}, output))
+        return false;
+    parallel_for(output.size(), workers, sizeof(std::optional<ray_interval<T>>),
+                 [&](std::size_t begin, std::size_t end) {
+                     for (std::size_t i = begin; i < end; ++i)
+                         output[i] = r.intersect(boxes[i], lo, hi);
+                 });
+    return true;
+}
+template <floating T, class Shape>
+    requires requires(const frustum<T> &f, const Shape &shape) {
+        { classify(f, shape) } -> std::same_as<containment>;
+    }
+[[nodiscard]] inline bool classify_batch(const frustum<T> &f, std::span<const Shape> input,
+                                         std::span<containment> output, unsigned workers) {
+    if (input.size() != output.size() || detail::spans_overlap(input, output) ||
+        detail::spans_overlap(std::span<const frustum<T>>{&f, 1}, output))
+        return false;
+    parallel_for(output.size(), workers, sizeof(containment), [&](std::size_t begin,
+                                                                  std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i)
+            output[i] = classify(f, input[i]);
+    });
     return true;
 }
 } // namespace chm

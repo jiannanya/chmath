@@ -48,15 +48,35 @@ template <floating T> [[nodiscard]] constexpr T smoothstep(T lo, T hi, T x) noex
                      : (x / T(2) - lo / T(2)) / (hi / T(2) - lo / T(2)));
     return t * t * (T(3) - T(2) * t);
 }
+// Three comparisons classify NaN and both infinities as non-finite. This form is
+// kept deliberately: on the measured targets it vectorizes and schedules better
+// than a library classification call in the validation loops that dominate the
+// geometry and factorization paths.
 template <floating T> [[nodiscard]] constexpr bool is_finite(T x) noexcept {
     return x == x && x <= std::numeric_limits<T>::max() && x >= std::numeric_limits<T>::lowest();
 }
+namespace detail {
+// Interpolation used by internal hot loops (de Casteljau, de Boor). For finite
+// operands whose difference is representable this is exactly a + t * (b - a),
+// which is also the form std::lerp reduces to in that range; the guard keeps the
+// public function's overflow protection when the difference itself overflows,
+// and the t == 1 shortcut keeps the exact endpoint that std::lerp guarantees, so
+// curve and patch corners still reproduce their control points bit for bit.
+// Avoiding the remaining branches of std::lerp matters because this runs
+// O(Degree^2) times per evaluation on very short vectors.
+template <floating T> [[nodiscard]] constexpr T lerp_finite(T a, T b, T t) noexcept {
+    if (t == T(1))
+        return b;
+    const T difference = b - a;
+    return is_finite(difference) ? a + t * difference : std::lerp(a, b, t);
+}
+} // namespace detail
 // Relative AND absolute tolerances are caller-selectable; infinities only equal themselves.
+namespace detail {
+// Body of almost_equal without the tolerance validation, so aggregate overloads
+// can validate the tolerances once instead of once per component.
 template <floating T>
-[[nodiscard]] constexpr bool almost_equal(T a, T b, T rel = epsilon<T>,
-                                          T abs = epsilon<T>) noexcept {
-    if (!is_finite(rel) || !is_finite(abs) || rel < T(0) || abs < T(0))
-        return false;
+[[nodiscard]] constexpr bool almost_equal_value(T a, T b, T rel, T abs) noexcept {
     if (a == b)
         return true;
     if (!is_finite(a) || !is_finite(b))
@@ -66,6 +86,17 @@ template <floating T>
     if (is_finite(difference) && is_finite(relative_limit))
         return difference <= std::max(abs, relative_limit);
     return difference <= abs || std::abs(a / scale - b / scale) <= rel;
+}
+} // namespace detail
+template <floating T> [[nodiscard]] constexpr bool tolerance_valid(T rel, T abs) noexcept {
+    return is_finite(rel) && is_finite(abs) && rel >= T(0) && abs >= T(0);
+}
+template <floating T>
+[[nodiscard]] constexpr bool almost_equal(T a, T b, T rel = epsilon<T>,
+                                          T abs = epsilon<T>) noexcept {
+    if (!tolerance_valid(rel, abs))
+        return false;
+    return detail::almost_equal_value(a, b, rel, abs);
 }
 template <floating T> [[nodiscard]] inline T wrap_angle(T x) noexcept {
     T r = std::remainder(x, tau<T>);

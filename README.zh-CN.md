@@ -8,7 +8,7 @@
 
 核心采用固定大小的紧凑值类型、栈上临时存储和显式借用的 `std::span`。提供 `float` / `double` 常用别名；向量与矩阵也支持其他算术类型，涉及长度、旋转和分解的接口限浮点类型。float/double 批处理和 4×4 float 矩阵乘法可使用 SSE2 / NEON，并提供标量回退。
 
-测试套件包含 **1000 个独立命名、可单独运行的用例**，其中有 **179 个内存安全、42 个性能、60 个压力用例**，另有堆分配计数、安装与链接检查。测试清单和本机实测结果见 [验证报告](docs/VALIDATION.md)。
+测试套件包含 **1019 个独立命名、可单独运行的用例**，其中有 **180 个内存安全、42 个性能、60 个压力用例**，另有堆分配计数、安装与链接检查。测试清单和本机实测结果见 [验证报告](docs/VALIDATION.md)。
 
 ## 模块
 
@@ -23,6 +23,7 @@
 | `curves/` | 任意固定次数 Bézier、联合求值/导数、三次 Horner 缓存、曲线分割、曲面及偏导、Hermite、Catmull-Rom、B-spline、NURBS |
 | `numeric/` | 稳定二次方程、Horner、多次求解可复用的 LU、Householder QR、最小二乘、Cholesky、对称特征分解、二分求根、自适应积分、补偿求和 |
 | `simd/` | AoS / SoA 点与方向变换、旋转、归一化；SoA 点积/叉积，4×4 float 乘法；非对齐加载、尾部处理、原地计算、重叠检查 |
+| `parallel/` | 为批处理入口的 workers 重载提供可选的 `std::thread` 拆分；串行回退、按缓存行对齐的分段、异常安全的线程汇合 |
 
 ## 快速使用
 
@@ -95,13 +96,15 @@ target_link_libraries(your_target PRIVATE chm::chmath)
 
 `vec3f` 对齐为 `alignof(float)`；这些类型都是标准布局、可平凡复制的值类型，不含指针、虚表或隐式额外通道。`double` 版本占用两倍空间。CPU 紧凑布局不代表满足 GPU uniform buffer 的额外对齐要求，上传时按图形 API 布局打包。
 
-性能设计包括编译期维度、列方向连续访问、可内联的小函数、无引用计数或运行时分派，以及 SoA / mat4f SIMD 内核。mat4f 乘法在常量求值时使用通用实现，运行时使用非对齐 SIMD 加载，不增加对象对齐或尺寸。普通范围的归一化走平方范数快速路径，极大/极小输入保留缩放保护。LU 共享行缩放与主元倒数，多右端回代减少重复除法；小矩阵乘法使用局部累加。四元数插值、矩阵转换和向量间旋转复用已算结果。同一曲线或射线可通过三次多项式及射线缓存接口复用准备工作。
+性能设计包括编译期维度、列方向连续访问、可内联的小函数、无引用计数或运行时分派，以及 SoA / mat4f SIMD 内核。mat4f 乘法在常量求值时使用通用实现，运行时使用非对齐 SIMD 加载，不增加对象对齐或尺寸。普通范围的归一化走平方范数快速路径，极大/极小输入保留缩放保护。LU 共享行缩放与主元倒数，多右端回代减少重复除法；小矩阵乘法、矩阵–向量乘法、仿射复合与四元数乘法都使用局部累加；4×4 float 矩阵–向量乘法复用矩阵乘法的 SIMD 后端。四元数插值、矩阵转换和向量间旋转复用已算结果，已经单位化的四元数插值会跳过近乎恒等的重归一化。Cholesky 和对称特征分解逐元素检查对称性而不再生成转置矩阵，Jacobi 旋转避免三角调用，`from_matrix` 直接按列检查正交性，`decompose` 用三重积而非 LU 行列式判断镜像。同一曲线或射线可通过三次多项式及射线缓存接口复用准备工作。
 
 默认不启用 `fast-math`、全局 CPU 本机专用指令或近似倒平方根，以保留 NaN / 无穷和错误检测语义。矩阵求逆选择带选主元的 LU，优先兼顾通用性和数值稳定性；同一矩阵反复求解可复用 `factor_lu` 结果。
 
 SIMD 路径不改变公共值类型 ABI。CMake 选项 `CHMATH_ENABLE_SIMD=OFF` 可关闭显式 SIMD；编译器仍可自动向量化普通循环。x86 SSE2 和支持 `__ARM_NEON` 的 ARM 工具链自动选择内核，其他平台执行标量实现。所有翻译单元应使用一致的宏设置；同一进程混用不同设置不受支持。
 
 批处理接受调用方提供的内存，不分配输出。允许完整原地操作，拒绝部分重叠；SoA 的输出通道必须互不重叠。变换参数本身不能与输出缓冲区重叠。失败返回 `false`，并在写入前完成尺寸与重叠检查。
+
+批处理入口另有可选的 workers 重载。设置 `CHMATH_ENABLE_PARALLEL=ON` 后这些重载用 `std::thread` 拆分批量；未启用、`workers <= 1` 或批量短于 `parallel_min_chunk` 时改在调用线程执行，结果完全相同。整批的尺寸与重叠契约会在任何线程启动前校验，分段按元素类型的整条缓存行对齐；平台无法创建线程时，剩余分段改由调用线程完成而不是失败。并行调用不使用全局线程池，多个调用方不会共享隐藏状态。
 
 本机实测、基准方法和完整日志见 [docs/VALIDATION.md](docs/VALIDATION.md)。性能取决于 CPU、编译器、数据大小与缓存，不能从单个基准推导所有应用的性能。
 
@@ -126,9 +129,13 @@ cmake --preset release
 cmake --build --preset release --parallel
 ctest --preset release
 ./build/release/chmath_bench
+./build/release/chmath_bench_extended
+./build/release/chmath_bench_parallel
 ```
 
-Windows 基准可执行文件为 `build/release/chmath_bench.exe`。可传入点数，例如 `chmath_bench 262144`。它输出预热后九组样本的中位数和范围，包含可被编译器优化的普通 SoA 基线，不把基线强制关闭自动向量化。
+Windows 基准可执行文件为 `build/release/chmath_bench.exe`、`chmath_bench_extended.exe` 和 `chmath_bench_parallel.exe`。可传入点数，例如 `chmath_bench 262144`。它们输出预热后九组样本的中位数和范围，包含可被编译器优化的普通 SoA 基线，不把基线强制关闭自动向量化。`chmath_bench_parallel` 始终以 `CHMATH_ENABLE_PARALLEL=1` 构建，并对比同一批量在 `workers=1` 与硬件线程数下的耗时。
+
+使用 `parallel` 预设（`cmake --preset parallel`）或 `-DCHMATH_ENABLE_PARALLEL=ON` 编译批处理入口的 workers 重载；具体保证见「内存与性能」一节。
 
 一键验证 Debug、Release、标量回退：
 
@@ -153,7 +160,7 @@ python scripts/test_inventory.py --build-dir build/release --output build/test-i
 python scripts/generate_extended_tests.py --check
 ```
 
-179 条内存安全用例使用 Windows `VirtualAlloc/VirtualProtect` 或 POSIX `mmap/mprotect` 建立真实保护页并检查缓冲区契约，覆盖 SIMD 尾部、只读输入、非 SIMD 对齐地址、原地计算和失败前不写入。新增 144 条覆盖 float/double、六种操作、12 种长度。下标越界等已声明的调用方前提不会被当作合法输入执行。
+180 条内存安全用例使用 Windows `VirtualAlloc/VirtualProtect` 或 POSIX `mmap/mprotect` 建立真实保护页并检查缓冲区契约，覆盖 SIMD 尾部、只读输入、非 SIMD 对齐地址、原地计算和失败前不写入。新增 144 条覆盖 float/double、六种操作、12 种长度。下标越界等已声明的调用方前提不会被当作合法输入执行。
 
 60 条压力用例覆盖反复归一化、变换累积、分解复用、射线网格、样条采样、批处理流水线、病态矩阵、振荡积分和 2/4/8 线程共享只读数据。每种类型/负载有 512、4096、32768 工作单位的三个级别；积分每 128 单位执行一次有求值预算的完整积分。
 
@@ -178,6 +185,7 @@ ctest --preset sanitize
 | `CHMATH_BUILD_EXAMPLES` | 顶层工程 ON | 可运行的 3D 场景示例 |
 | `CHMATH_BUILD_BENCHMARKS` | OFF | 无外部依赖的性能基准 |
 | `CHMATH_ENABLE_SIMD` | ON | 可用平台的显式 SIMD 批处理和 mat4f 乘法 |
+| `CHMATH_ENABLE_PARALLEL` | OFF | 批处理入口 workers 重载的 `std::thread` 拆分（否则串行回退） |
 | `CHMATH_SANITIZERS` | OFF | Unix GCC / Clang 下启用 ASan 和 UBSan |
 | `CHMATH_COVERAGE` | OFF | Clang 源码覆盖率 |
 | `CHMATH_PERFORMANCE_CHECKS` | OFF | 稳定 Release runner 上启用相对性能阈值 |

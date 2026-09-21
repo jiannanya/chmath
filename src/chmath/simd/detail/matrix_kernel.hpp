@@ -59,6 +59,28 @@ inline void multiply_mat4_float(const float *a, const float *b, float *out) noex
         }
 #endif
 }
+
+// Internal kernel: column-major float 4x4 matrix times a 4-component vector.
+// `out` receives all four lanes and must not alias `a` or `b`. Multiply and add
+// order matches the generic operator*(mat, vec) so results are identical.
+inline void multiply_mat4_vec4_float(const float *a, const float *b, float *out) noexcept {
+#if defined(CHMATH_DETAIL_MATRIX_SSE2)
+    auto sum = _mm_mul_ps(_mm_loadu_ps(a), _mm_set1_ps(b[0]));
+    sum = _mm_add_ps(sum, _mm_mul_ps(_mm_loadu_ps(a + 4), _mm_set1_ps(b[1])));
+    sum = _mm_add_ps(sum, _mm_mul_ps(_mm_loadu_ps(a + 8), _mm_set1_ps(b[2])));
+    sum = _mm_add_ps(sum, _mm_mul_ps(_mm_loadu_ps(a + 12), _mm_set1_ps(b[3])));
+    _mm_storeu_ps(out, sum);
+#elif defined(CHMATH_DETAIL_MATRIX_NEON)
+    auto sum = vmulq_f32(vld1q_f32(a), vdupq_n_f32(b[0]));
+    sum = vaddq_f32(sum, vmulq_f32(vld1q_f32(a + 4), vdupq_n_f32(b[1])));
+    sum = vaddq_f32(sum, vmulq_f32(vld1q_f32(a + 8), vdupq_n_f32(b[2])));
+    sum = vaddq_f32(sum, vmulq_f32(vld1q_f32(a + 12), vdupq_n_f32(b[3])));
+    vst1q_f32(out, sum);
+#else
+    for (std::size_t i = 0; i < 4; ++i)
+        out[i] = ((a[i] * b[0] + a[4 + i] * b[1]) + a[8 + i] * b[2]) + a[12 + i] * b[3];
+#endif
+}
 } // namespace chm::detail
 #undef CHMATH_DETAIL_MATRIX_SSE2
 #undef CHMATH_DETAIL_MATRIX_NEON

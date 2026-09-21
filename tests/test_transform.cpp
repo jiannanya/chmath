@@ -202,3 +202,28 @@ CH_TEST(projection_rejects_invalid) {
     CHECK(!project(vec3d{}, mat4d::identity(), viewport<double>{}));
     CHECK(!unproject(vec3d{}, mat4d::identity(), viewport<double>{}));
 }
+CH_TEST(quaternion_interpolation_near_unit_inputs) {
+    // Interpolation treats quaternions whose squared norm is within epsilon of
+    // one as unit. Verify against an explicitly normalized reference, and make
+    // sure genuinely scaled inputs still take the stabilizing normalization.
+    const auto a = *from_axis_angle(vec3d{1, 2, 3}, 0.7);
+    const auto b = *from_axis_angle(vec3d{-2, 1, 0.5}, 1.4);
+    const auto slightly_scaled = normalize(a * 3.0) * (1.0 + epsilon<double> / 4.0);
+    CHECK(dot(slightly_scaled, slightly_scaled) <= 1.0 + epsilon<double>);
+    for (double t : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+        NEAR(nlerp(slightly_scaled, b, t).coefficients,
+             nlerp(normalize(slightly_scaled), b, t).coefficients, 1e-13);
+        NEAR(slerp(slightly_scaled, b, t).coefficients,
+             slerp(normalize(slightly_scaled), b, t).coefficients, 1e-13);
+    }
+    const auto huge = a * 1e250;
+    NEAR(nlerp(huge, b, 0.25).coefficients, nlerp(a, b, 0.25).coefficients, 1e-12);
+    NEAR(slerp(huge, b, 0.25).coefficients, slerp(a, b, 0.25).coefficients, 1e-12);
+    const auto tiny = a * 1e-250;
+    NEAR(nlerp(tiny, b, 0.75).coefficients, nlerp(a, b, 0.75).coefficients, 1e-12);
+    NEAR(slerp(tiny, b, 0.75).coefficients, slerp(a, b, 0.75).coefficients, 1e-12);
+    for (double t : {0.0, 0.37, 1.0}) {
+        NEAR(dot(nlerp(a, b, t), nlerp(a, b, t)), 1.0, 1e-14);
+        NEAR(dot(slerp(a, b, t), slerp(a, b, t)), 1.0, 1e-14);
+    }
+}

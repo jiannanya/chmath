@@ -113,7 +113,15 @@ plane_from_points(const vec<T, 3> &a, const vec<T, 3> &b, const vec<T, 3> &c) no
     const auto u = try_normalize(ab), v = try_normalize(ac);
     if (!u || !v)
         return std::nullopt;
-    const auto n = try_normalize(cross(*u, *v));
+    // Collinear points have no unique plane. The magnitude test is the same
+    // relative degeneracy criterion used by barycentric(): with unit u and v it
+    // compares sin^2(angle) against the tolerance. A plain exact-zero test on the
+    // cross product is not sufficient because a fused multiply-subtract leaves a
+    // non-zero rounding residual for two identical unit vectors.
+    const auto n0 = cross(*u, *v);
+    if (dot(n0, n0) <= epsilon<T>)
+        return std::nullopt;
+    const auto n = try_normalize(n0);
     if (!n)
         return std::nullopt;
     return make_plane(*n, -dot(*n, a));

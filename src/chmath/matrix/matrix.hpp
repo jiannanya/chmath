@@ -112,10 +112,23 @@ template <scalar T, std::size_t R, std::size_t C>
 }
 template <scalar T, std::size_t R, std::size_t C>
 [[nodiscard]] constexpr vec<T, R> operator*(const mat<T, R, C> &a, const vec<T, C> &b) noexcept {
+    if constexpr (std::same_as<T, float> && R == 4 && C == 4 && detail::native_mat4_kernel) {
+        if (!std::is_constant_evaluated()) {
+            vec<T, R> r;
+            detail::multiply_mat4_vec4_float(a.data(), b.data(), r.data());
+            return r;
+        }
+    }
+    // One local accumulator per row, seeded with the first product so the whole
+    // dot product is a single dependency chain assigned once. This avoids the
+    // read-modify-write of a zero-initialized result element for every column.
     vec<T, R> r;
-    for (std::size_t j = 0; j < C; ++j)
-        for (std::size_t i = 0; i < R; ++i)
-            r[i] += a(i, j) * b[j];
+    for (std::size_t i = 0; i < R; ++i) {
+        T sum = a(i, 0) * b[0];
+        for (std::size_t j = 1; j < C; ++j)
+            sum += a(i, j) * b[j];
+        r[i] = sum;
+    }
     return r;
 }
 template <scalar T, std::size_t R, std::size_t K, std::size_t C>
@@ -129,11 +142,16 @@ template <scalar T, std::size_t R, std::size_t K, std::size_t C>
             return r;
         }
     }
-    if constexpr (R <= 3 && K <= 4 && C <= 4) {
+    // Small products keep the whole dot product in one local accumulator and
+    // assign once. Seeding it with the first product (instead of zero) lets the
+    // remaining terms contract into a single fused chain, which is both faster
+    // and gives the product a fixed evaluation shape independent of how the
+    // caller consumes it.
+    if constexpr (R <= 4 && K <= 4 && C <= 4) {
         for (std::size_t j = 0; j < C; ++j)
             for (std::size_t i = 0; i < R; ++i) {
-                T sum{};
-                for (std::size_t k = 0; k < K; ++k)
+                T sum = a(i, 0) * b(0, j);
+                for (std::size_t k = 1; k < K; ++k)
                     sum += a(i, k) * b(k, j);
                 r(i, j) = sum;
             }
@@ -178,8 +196,10 @@ template <floating T, std::size_t R, std::size_t C>
 template <floating T, std::size_t R, std::size_t C>
 [[nodiscard]] constexpr bool almost_equal(const mat<T, R, C> &a, const mat<T, R, C> &b,
                                           T rel = epsilon<T>, T abs = epsilon<T>) noexcept {
+    if (!tolerance_valid(rel, abs))
+        return false;
     for (std::size_t i = 0; i < R * C; ++i)
-        if (!almost_equal(a.elements[i], b.elements[i], rel, abs))
+        if (!detail::almost_equal_value(a.elements[i], b.elements[i], rel, abs))
             return false;
     return true;
 }

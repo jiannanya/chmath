@@ -187,3 +187,30 @@ AoS 输入/输出类型分别为 `std::span<const vec<T,3>>` 与 `std::span<vec<
 所有 span 长度必须一致，返回 bool 表示尺寸与重叠契约是否成立。输入和输出可完全重合或完全分离，不能部分重叠；每个输出 SoA 通道相互分离。完整通道置换也可原地执行。旋转额外检查四元数有限且单位长度，归一化逐向量处理非法数值；其他函数不逐个检查分量是否有限，结果遵循普通浮点算术。变换参数对象不能与输出存储重叠。span 必须引用存活、可访问且正确对齐的对象；长度/重叠检查不能验证悬空指针或调用方虚构的容量。
 
 库没有可变全局缓存。不同线程可共享不可变值对象、分解和曲线视图，但视图借用的数据也必须保持不变；并发输出需使用互不重叠的缓冲区。内存安全和压力测试覆盖这些约定，不保证违反前提的调用安全。
+
+## 并行批处理
+
+```cpp
+const auto workers = chm::parallel_default_workers();
+std::array<float, 32768> x{}, y{}, z{}, ox{}, oy{}, oz{};
+const chm::soa3<float> input{x, y, z}, output{ox, oy, oz};
+const bool ok = chm::transform_points(
+    chm::translation(chm::vec3f{1, 2, 3}), input.as_const(), output, workers);
+```
+
+`CHMATH_ENABLE_PARALLEL=1`（CMake 选项 `CHMATH_ENABLE_PARALLEL=ON`）时，批处理入口的 workers 重载用 `std::thread` 把 `[0, count)` 拆成互不重叠的连续分段；未启用该宏时所有 workers 重载仍按串行执行并返回相同结果，调用代码无需条件编译。
+
+| 接口 | 说明 |
+| --- | --- |
+| `parallel_hardware_threads()` | 平台报告的硬件线程数，至少 1 |
+| `parallel_default_workers()` | 未显式指定时的线程数 |
+| `parallel_workers(count, workers = 0)` | 该请求实际会使用的线程数，0 表示默认；空区间为 0 |
+| `parallel_for(count, workers, item_bytes, body)` | 通用分段入口，`body(begin, end)` 处理半开区间，返回实际线程数 |
+| `parallel_for<T>(count, workers, body)` | 按 `sizeof(T)` 对齐分段的便捷重载 |
+| `parallel_min_chunk` | 小于该批量不拆分，默认 `1 << 15` |
+
+workers 重载与原函数同名，在参数表末位追加 `unsigned workers`：`transform_points`、`transform_vectors`、`rotate_vectors`、`normalize_vectors`、`dot_batch`、`cross_batch`、`classify_batch`；`intersect_many` 的 workers 排在显式的区间参数之后（`intersect_many(r, boxes, output, lo, hi, workers)`），避免与 `t` 值混淆。
+
+请求线程数会被硬件线程数和批量大小夹取：每个分段至少包含 `parallel_min_chunk` 个元素。相邻分段按元素类型的整条缓存行对齐，避免相邻写入共享缓存行。整批的尺寸与重叠契约在任何线程启动前检查，失败时不写入任何输出；分段之间互不重叠，并行结果与串行入口逐元素一致。`rotate_vectors` 仍在拆分前验证四元数有限且为单位长度。平台拒绝创建线程时，未被认领的分段在调用线程完成，函数返回实际使用的线程数而不是失败。
+
+并行入口不承诺零分配：每次并行调用会创建线程对象和异常槽。库不维护全局线程池，因此多个互不相交的调用可以安全并发；调用方仍需保证输出缓冲区不被其他线程同时写入。body 抛出的异常会被捕获，全部线程汇合后在调用线程重新抛出第一个失败。

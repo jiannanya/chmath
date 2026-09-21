@@ -206,3 +206,45 @@ CH_TEST(matrix_eigen_zero_budget_reports_failure) {
     const auto e = symmetric_eigen(a, 1e-12, 0);
     CHECK(e && !e->converged && e->sweeps == 0);
 }
+CH_TEST(matrix_vector_product_reference) {
+    // Covers the 4x4 float SIMD kernel, the generic accumulator path, and a
+    // rectangular shape against a long-double oracle.
+    mat4f a;
+    for (std::size_t i = 0; i < a.elements.size(); ++i)
+        a.elements[i] = float(i % 7) - 3.0F;
+    const vec4f v{-1.5F, 0.25F, 2.0F, -0.75F};
+    const auto r = a * v;
+    for (std::size_t i = 0; i < 4; ++i) {
+        long double expected = 0;
+        for (std::size_t j = 0; j < 4; ++j)
+            expected += static_cast<long double>(a(i, j)) * static_cast<long double>(v[j]);
+        NEAR(r[i], static_cast<float>(expected), 1e-5F);
+    }
+    const vec4d vd{-1.5, 0.25, 2.0, -0.75};
+    mat4d b;
+    for (std::size_t i = 0; i < b.elements.size(); ++i)
+        b.elements[i] = double(i % 5) * 0.25 - 0.5;
+    const auto rd = b * vd;
+    for (std::size_t i = 0; i < 4; ++i) {
+        long double expected = 0;
+        for (std::size_t j = 0; j < 4; ++j)
+            expected += static_cast<long double>(b(i, j)) * static_cast<long double>(vd[j]);
+        NEAR(rd[i], static_cast<double>(expected), 1e-13);
+    }
+    mat<double, 3, 5> c;
+    for (std::size_t i = 0; i < c.elements.size(); ++i)
+        c.elements[i] = double(i) / 3.0;
+    const vec<double, 5> v5{1, -2, 3, -4, 5};
+    const auto r5 = c * v5;
+    for (std::size_t i = 0; i < 3; ++i) {
+        long double expected = 0;
+        for (std::size_t j = 0; j < 5; ++j)
+            expected += static_cast<long double>(c(i, j)) * static_cast<long double>(v5[j]);
+        NEAR(r5[i], static_cast<double>(expected), 1e-13);
+    }
+    // Constant evaluation must not use the runtime kernel and must agree.
+    constexpr mat4f constant_matrix{2.0F};
+    constexpr vec4f constant_vector{1.0F, 2.0F, 3.0F, 4.0F};
+    constexpr auto constant_result = constant_matrix * constant_vector;
+    CHECK(constant_result == vec4f{2.0F, 4.0F, 6.0F, 8.0F});
+}

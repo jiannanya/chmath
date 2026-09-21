@@ -2,6 +2,8 @@
 
 验证日期：2026-09-12。目录：`E:/cc/AI/tokmon/chmath`。C++ 命名空间为 **`chm`**，CMake 导出目标为 **`chm::chmath`**，包名及头文件路径继续使用 `chmath`。不提供旧命名空间别名；安装消费程序使用 `find_package(chmath 2 CONFIG REQUIRED)`。
 
+> 2026-09-21/22 的后续优化（并行批处理、热点收敛与临时对象削减）见文末 [2026-09-22 优化续作](#2026-09-22-优化续作)。该轮把套件扩展到 1019 条独立用例，并新增独立并行基准；本文其余内容仍为 2026-09-12 的验证记录。
+
 测试由 300 条增至 **1000 条独立命名用例**。统一执行完成 **1,250,926 次运行时检查，0 失败**。[1000 条清单及源码位置](results/2026-09-12/test-inventory.json)、[统一运行日志](results/2026-09-12/unified-tests.log)。循环次数、压力迭代次数、编译期断言和跨编译器重复执行均不计入独立用例数量。
 
 ## 实际验证结果
@@ -120,3 +122,76 @@ TSAN_OPTIONS=halt_on_error=1 build/stress-tsan
 请为不同编译器使用不同构建目录；更换编译器会使 CMake 重置缓存选项。覆盖率每次使用新的 profile 目录。相对性能阈值通过 `-DCHMATH_PERFORMANCE_CHECKS=ON` 启用，仅在稳定 Release 环境运行两个性能可执行文件。
 
 前一版本的 300 条测试报告保留于 [2026-09-08 报告](VALIDATION-2026-09-08.md)，其数字不作为本轮结果。
+
+## 2026-09-22 优化续作
+
+本轮在 2026-09-12 报告之后继续推进全库性能与内存占用优化，分为两部分：**并行批处理入口**（新增能力，默认关闭）与**热点函数收敛**（更短的依赖链、更少的临时对象和超越函数调用）。公共值类型的尺寸、对齐、ABI、错误处理语义与核心零分配保证均未改变；并行入口是显式传入 `workers` 的独立重载，默认调用仍走串行路径。
+
+### 环境与方法
+
+- 机器：Apple Silicon（macOS 26，`hw.ncpu=16`，其中 12 个性能核心），Apple Clang 17.0.0，`-O3 -DNDEBUG`，NEON 后端。
+- macOS 不支持 Windows 基准脚本的逻辑处理器绑定，因此数字取每进程 9 组样本的中位数、3 个进程再取中位数；前后源码使用相同命令、相同数据与固定随机种子。预分配缓冲区、不可内联调用边界和被消费的输出防止工作被优化掉。小于 5% 的差异不作为结论。
+- 测试套件扩展到 **1019 条独立命名用例**（180 条安全、42 条性能、60 条压力）。`test_parallel` 始终以 `CHMATH_ENABLE_PARALLEL=1` 编译，在默认构建中也会真正创建线程并逐元素对比串行结果。
+
+| 配置 | 全部测试 | 结果 |
+| --- | ---: | --- |
+| Release（SIMD ON，并行宏关闭） | 1023/1023 | 通过 |
+| Release + `CHMATH_ENABLE_PARALLEL=ON` + `CHMATH_BUILD_BENCHMARKS=ON` | 1023/1023 | 通过 |
+
+（1023 = 1019 条命名用例 + 堆分配计数、ODR、安装消费程序、场景示例；无覆盖率配置时不含统一覆盖率程序。）
+
+### 热点收敛
+
+单位为 ns/项；「前」为 2026-09-21 优化前的工作树，「后」为本轮结束。矩阵/四元数微基准为 4096 项 × 9 组样本；扩展基准为 65536 项。
+
+| 运算 | 前 | 后 | 变化 |
+| --- | ---: | ---: | ---: |
+| `quaternion nlerp`（扩展基准） | 4.76 | 3.36–3.46 | 约 −28% |
+| `quaternion slerp near`（扩展基准） | 5.32 | 3.72–3.85 | 约 −29% |
+| `quaternion slerp wide`（扩展基准） | 16.0 | 12.4–13.1 | 约 −21% |
+| `quaternion from matrix`（扩展基准） | 18.5 | 13.7–14.4 | 约 −24% |
+| `chmath quaternion rotate`（核心基准） | 0.578 | 0.522 | 约 −10% |
+| 4×4 float 矩阵 × 向量（`transform_point(mat4f)`） | 2.85 | 2.48 | 约 −13% |
+| `mat3f * vec3f` | 0.97 | 0.88 | 约 −9% |
+| `symmetric_eigen` 3×3 | 355 | 300 | 约 −15% |
+| `cholesky` 3×3 | 9.8 | 8.1 | 约 −18% |
+
+未观察到回退的负载（变化在噪声范围内）：`mat3f`/`mat4d` 矩阵乘法、Bezier 联合求值、ray AABB 查询、SoA double 变换与点积、`normalize vec3d`、`factor_qr`。
+
+对应实现变化：
+
+- 矩阵 × 向量、仿射复合、四元数乘法与旋转改为分量式局部累加，避免对零初始化结果元素的读改写和中间向量；4×4 float 矩阵 × 向量使用与矩阵乘法相同的 SSE2/NEON 内核，常量求值仍走通用实现。
+- 四元数插值把平方范数落在 `epsilon` 内的输入视为单位，跳过近似恒等的重归一化；最终结果仍会归一化，明显缩放、零或非有限输入保持原有稳定路径。
+- Cholesky 与对称特征分解逐元素校验对称性（矩阵乘法路径中 `transpose(A)*A` 的元素恰为列点积），不再生成转置矩阵；Jacobi 旋转用 `hypot` 形式的正切公式替代 `atan2` + `cos` + `sin`。
+- `from_matrix` 直接在列上检查正交性与右手性，不再构造 `transpose(m)*m`；`decompose` 用三重积判断镜像，不再调用 LU 行列式；`compose` 就地缩放列。
+- 这些改动同时减少了栈上临时对象：对称分解去掉两个 N×N 转置临时量，矩阵转换去掉一个 3×3 乘积，仿射复合去掉两个 3×3 临时量。`test_allocation` 仍报告核心接口 **0 次堆分配**。
+
+### 并行批处理
+
+`workers` 重载以 `CHMATH_ENABLE_PARALLEL=ON` 编译后启动 `std::thread` 工作线程；未启用、`workers <= 1`、批量小于 `parallel_min_chunk`（默认 32768）或平台拒绝创建线程时自动串行完成。分段按元素类型的整条缓存行对齐，整批契约在启动线程前校验，异常在所有线程汇合后重抛。1,048,576 项、16 个报告的硬件线程：
+
+| 负载 | workers=1 | workers=16 | 加速 |
+| --- | ---: | ---: | ---: |
+| SoA double transform | 0.844 | 0.265 | 3.18× |
+| SoA double dot | 0.346 | 0.159 | 2.17× |
+| AoS double normalize | 1.063 | 0.247 | 4.30× |
+| prepared ray AABB | 15.13 | 1.92 | 7.88× |
+| frustum classify | 9.84 | 1.37 | 7.18× |
+
+262,144 项时对应加速为 2.17× / 1.38× / 2.59× / 4.75× / 5.96×：变换与点积受内存带宽与线程创建成本限制，扩展性低于每项计算更重的查询。65,536 项、每项工作很少的点积可能慢于串行（默认阈值因此保持保守）；调用方对廉价内核应只在批量足够大时传 `workers`。每个并行调用自行创建线程，不使用全局线程池，多个互不相交的调用可以安全并发。
+
+### 复现
+
+```sh
+cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCHMATH_BUILD_BENCHMARKS=ON
+cmake --build build/release --parallel
+ctest --test-dir build/release --output-on-failure
+./build/release/chmath_bench 65536
+./build/release/chmath_bench_extended 65536
+./build/release/chmath_bench_parallel 1048576
+cmake -S . -B build/parallel -G Ninja -DCMAKE_BUILD_TYPE=Release -DCHMATH_ENABLE_PARALLEL=ON
+cmake --build build/parallel --parallel
+ctest --test-dir build/parallel --output-on-failure
+```
+
+本机数字来自单台 ARM64 macOS，未固定核心或频率；它们不代表 x86、MSVC 或其他负载。CI 新增 `parallel` 作业在 Ubuntu 上用 `CHMATH_ENABLE_PARALLEL=ON` 构建并运行完整套件，并冒烟运行并行基准，但不启用耗时阈值。

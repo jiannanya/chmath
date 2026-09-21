@@ -1,5 +1,6 @@
 #pragma once
 #include <chmath/core/span.hpp>
+#include <chmath/parallel/parallel.hpp>
 #include <chmath/simd/detail/packet.hpp>
 #include <chmath/transform/transform.hpp>
 
@@ -200,6 +201,139 @@ template <floating T>
         return false;
     for (std::size_t i = 0; i < input.size(); ++i)
         output[i] = normalize(input[i]);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Opt-in parallel overloads.
+//
+// Each function performs the same whole-batch validation as its serial
+// counterpart and returns false before any output is written when the buffers
+// are invalid or partially overlap. A valid batch is then split into
+// cache-line-aligned contiguous ranges that are independent by construction,
+// so results are element-wise identical to the serial entry point regardless
+// of the worker count. Passing workers <= 1, a batch shorter than
+// parallel_min_chunk, or compiling without CHMATH_ENABLE_PARALLEL keeps the
+// serial path. Preparing the worker list can only throw std::bad_alloc, and a
+// platform that refuses to create a thread falls back to running the remaining
+// ranges on the calling thread. The kernels themselves are noexcept.
+// ---------------------------------------------------------------------------
+template <floating T>
+[[nodiscard]] inline bool transform_points(const affine3<T> &a, const_soa3<T> input, soa3<T> output,
+                                           unsigned workers) {
+    if (!detail::valid_batch(input, output))
+        return false;
+    parallel_for(input.size(), workers, sizeof(T), [&](std::size_t begin, std::size_t end) {
+        const std::size_t length = end - begin;
+        const const_soa3<T> part{input.x.subspan(begin, length), input.y.subspan(begin, length),
+                                 input.z.subspan(begin, length)};
+        const soa3<T> result{output.x.subspan(begin, length), output.y.subspan(begin, length),
+                             output.z.subspan(begin, length)};
+        (void)detail::transform_soa<true>(a, part, result);
+    });
+    return true;
+}
+template <floating T>
+[[nodiscard]] inline bool transform_vectors(const affine3<T> &a, const_soa3<T> input,
+                                            soa3<T> output, unsigned workers) {
+    if (!detail::valid_batch(input, output))
+        return false;
+    parallel_for(input.size(), workers, sizeof(T), [&](std::size_t begin, std::size_t end) {
+        const std::size_t length = end - begin;
+        const const_soa3<T> part{input.x.subspan(begin, length), input.y.subspan(begin, length),
+                                 input.z.subspan(begin, length)};
+        const soa3<T> result{output.x.subspan(begin, length), output.y.subspan(begin, length),
+                             output.z.subspan(begin, length)};
+        (void)detail::transform_soa<false>(a, part, result);
+    });
+    return true;
+}
+template <floating T, class Input, class Output>
+[[nodiscard]] inline bool rotate_vectors(const quat<T> &q, Input input, Output output,
+                                         unsigned workers) {
+    if (!is_finite(q) || !almost_equal(dot(q, q), T(1), T(4) * epsilon<T>, T(4) * epsilon<T>))
+        return false;
+    return transform_vectors(rotation(q), input, output, workers);
+}
+template <floating T>
+[[nodiscard]] inline bool dot_batch(const_soa3<T> a, const_soa3<T> b, std::span<T> output,
+                                    unsigned workers) {
+    if (!a.valid() || !b.valid() || a.size() != b.size() || a.size() != output.size())
+        return false;
+    for (auto src : {a.x, a.y, a.z, b.x, b.y, b.z})
+        if (detail::unsafe_overlap(src, output))
+            return false;
+    parallel_for(output.size(), workers, sizeof(T), [&](std::size_t begin, std::size_t end) {
+        const std::size_t length = end - begin;
+        const const_soa3<T> pa{a.x.subspan(begin, length), a.y.subspan(begin, length),
+                               a.z.subspan(begin, length)},
+            pb{b.x.subspan(begin, length), b.y.subspan(begin, length), b.z.subspan(begin, length)};
+        (void)dot_batch(pa, pb, output.subspan(begin, length));
+    });
+    return true;
+}
+template <floating T>
+[[nodiscard]] inline bool cross_batch(const_soa3<T> a, const_soa3<T> b, soa3<T> output,
+                                      unsigned workers) {
+    if (!detail::valid_batch(a, output) || !detail::valid_batch(b, output))
+        return false;
+    parallel_for(output.size(), workers, sizeof(T), [&](std::size_t begin, std::size_t end) {
+        const std::size_t length = end - begin;
+        const const_soa3<T> pa{a.x.subspan(begin, length), a.y.subspan(begin, length),
+                               a.z.subspan(begin, length)},
+            pb{b.x.subspan(begin, length), b.y.subspan(begin, length), b.z.subspan(begin, length)};
+        const soa3<T> part{output.x.subspan(begin, length), output.y.subspan(begin, length),
+                           output.z.subspan(begin, length)};
+        (void)cross_batch(pa, pb, part);
+    });
+    return true;
+}
+template <floating T>
+[[nodiscard]] inline bool normalize_vectors(const_soa3<T> input, soa3<T> output,
+                                            unsigned workers) {
+    if (!detail::valid_batch(input, output))
+        return false;
+    parallel_for(input.size(), workers, sizeof(T), [&](std::size_t begin, std::size_t end) {
+        const std::size_t length = end - begin;
+        const const_soa3<T> part{input.x.subspan(begin, length), input.y.subspan(begin, length),
+                                 input.z.subspan(begin, length)};
+        const soa3<T> result{output.x.subspan(begin, length), output.y.subspan(begin, length),
+                             output.z.subspan(begin, length)};
+        (void)normalize_vectors(part, result);
+    });
+    return true;
+}
+template <floating T>
+[[nodiscard]] inline bool transform_points(const affine3<T> &a, std::span<const vec<T, 3>> input,
+                                           std::span<vec<T, 3>> output, unsigned workers) {
+    if (input.size() != output.size() || detail::unsafe_overlap(input, output))
+        return false;
+    parallel_for(input.size(), workers, sizeof(vec<T, 3>), [&](std::size_t begin, std::size_t end) {
+        (void)transform_points(a, input.subspan(begin, end - begin),
+                               output.subspan(begin, end - begin));
+    });
+    return true;
+}
+template <floating T>
+[[nodiscard]] inline bool transform_vectors(const affine3<T> &a, std::span<const vec<T, 3>> input,
+                                            std::span<vec<T, 3>> output, unsigned workers) {
+    if (input.size() != output.size() || detail::unsafe_overlap(input, output))
+        return false;
+    parallel_for(input.size(), workers, sizeof(vec<T, 3>), [&](std::size_t begin, std::size_t end) {
+        (void)transform_vectors(a, input.subspan(begin, end - begin),
+                                output.subspan(begin, end - begin));
+    });
+    return true;
+}
+template <floating T>
+[[nodiscard]] inline bool normalize_vectors(std::span<const vec<T, 3>> input,
+                                            std::span<vec<T, 3>> output, unsigned workers) {
+    if (input.size() != output.size() || detail::unsafe_overlap(input, output))
+        return false;
+    parallel_for(input.size(), workers, sizeof(vec<T, 3>), [&](std::size_t begin, std::size_t end) {
+        (void)normalize_vectors(input.subspan(begin, end - begin),
+                                output.subspan(begin, end - begin));
+    });
     return true;
 }
 } // namespace chm

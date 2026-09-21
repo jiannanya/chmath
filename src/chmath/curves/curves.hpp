@@ -6,6 +6,17 @@
 
 namespace chm {
 
+namespace detail {
+template <floating T, std::size_t N>
+[[nodiscard]] constexpr vec<T, N> lerp_finite(const vec<T, N> &a, const vec<T, N> &b,
+                                              T t) noexcept {
+    vec<T, N> r;
+    for (std::size_t i = 0; i < N; ++i)
+        r[i] = lerp_finite(a[i], b[i], t);
+    return r;
+}
+} // namespace detail
+
 template <floating T, std::size_t N> struct curve_sample {
     vec<T, N> position{}, derivative{};
 };
@@ -19,15 +30,15 @@ template <floating T, std::size_t N, std::size_t Degree> struct bezier {
             auto work = control;
             for (std::size_t k = Degree; k > 1; --k)
                 for (std::size_t i = 0; i < k; ++i)
-                    work[i] = lerp(work[i], work[i + 1], t);
-            return {lerp(work[0], work[1], t), (work[1] - work[0]) * T(Degree)};
+                    work[i] = detail::lerp_finite(work[i], work[i + 1], t);
+            return {detail::lerp_finite(work[0], work[1], t), (work[1] - work[0]) * T(Degree)};
         }
     }
     [[nodiscard]] constexpr vec<T, N> evaluate(T t) const noexcept {
         auto work = control;
         for (std::size_t k = Degree; k > 0; --k)
             for (std::size_t i = 0; i < k; ++i)
-                work[i] = lerp(work[i], work[i + 1], t);
+                work[i] = detail::lerp_finite(work[i], work[i + 1], t);
         return work[0];
     }
     [[nodiscard]] constexpr auto derivative() const noexcept
@@ -45,7 +56,7 @@ template <floating T, std::size_t N, std::size_t Degree> struct bezier {
         right.control[Degree] = work[Degree];
         for (std::size_t k = Degree; k > 0; --k) {
             for (std::size_t i = 0; i < k; ++i)
-                work[i] = lerp(work[i], work[i + 1], t);
+                work[i] = detail::lerp_finite(work[i], work[i + 1], t);
             left.control[Degree - k + 1] = work[0];
             right.control[k - 1] = work[k - 1];
         }
@@ -128,7 +139,7 @@ template <floating T, std::size_t Degree>
            1;
 }
 template <floating T, std::size_t N, std::size_t Degree>
-[[nodiscard]] vec<T, N> de_boor(std::array<vec<T, N>, Degree + 1> work, std::span<const T> knots,
+[[nodiscard]] vec<T, N> de_boor(std::array<vec<T, N>, Degree + 1> &work, std::span<const T> knots,
                                 std::size_t span, T u) noexcept {
     for (std::size_t r = 1; r <= Degree; ++r)
         for (std::size_t j = Degree; j >= r; --j) {
@@ -140,7 +151,7 @@ template <floating T, std::size_t N, std::size_t Degree>
                     ? T(0)
                     : (is_finite(denominator) ? (u - lo) / denominator
                                               : (u / T(2) - lo / T(2)) / (hi / T(2) - lo / T(2)));
-            work[j] = lerp(work[j - 1], work[j], alpha);
+            work[j] = lerp_finite(work[j - 1], work[j], alpha);
         }
     return work[Degree];
 }

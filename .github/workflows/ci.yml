@@ -43,3 +43,14 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: ctest --test-dir build/sanitize --output-on-failure --parallel 4
+  parallel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure with opt-in parallel batches and benchmarks
+        run: cmake -S . -B build/parallel -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release -DCHMATH_ENABLE_PARALLEL=ON -DCHMATH_BUILD_BENCHMARKS=ON
+      - run: cmake --build build/parallel --parallel 4
+      - name: Full suite with the worker path compiled in
+        run: ctest --test-dir build/parallel --output-on-failure --parallel 4
+      - name: Smoke the parallel benchmark
+        run: ./build/parallel/chmath_bench_parallel 262144

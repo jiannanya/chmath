@@ -45,7 +45,23 @@ template <floating T>
 }
 template <floating T>
 [[nodiscard]] constexpr affine3<T> operator*(const affine3<T> &a, const affine3<T> &b) noexcept {
-    return {a.linear() * b.linear(), transform_point(a, b.translation())};
+    // Compose directly into the 3x4 result instead of materializing a.linear()
+    // and then multiplying two temporary 3x3 matrices. The expression grouping
+    // matches the generic small-matrix product and transform_point, so results
+    // are unchanged.
+    const auto &am = a.matrix;
+    affine3<T> r;
+    for (std::size_t j = 0; j < 3; ++j) {
+        const auto column = b.matrix.column(j);
+        for (std::size_t i = 0; i < 3; ++i)
+            r.matrix(i, j) = (am(i, 0) * column[0] + am(i, 1) * column[1]) + am(i, 2) * column[2];
+    }
+    const auto translation = b.matrix.column(3);
+    for (std::size_t i = 0; i < 3; ++i)
+        r.matrix(i, 3) = ((am(i, 0) * translation[0] + am(i, 1) * translation[1]) +
+                          am(i, 2) * translation[2]) +
+                         am(i, 3);
+    return r;
 }
 template <floating T> [[nodiscard]] constexpr mat<T, 4, 4> to_matrix(const affine3<T> &a) noexcept {
     auto r = mat<T, 4, 4>::identity();
@@ -115,7 +131,8 @@ template <floating T> struct trs {
 template <floating T> [[nodiscard]] constexpr affine3<T> compose(const trs<T> &t) noexcept {
     auto m = to_matrix(t.orientation);
     for (std::size_t j = 0; j < 3; ++j)
-        m.set_column(j, m.column(j) * t.scale[j]);
+        for (std::size_t i = 0; i < 3; ++i)
+            m(i, j) *= t.scale[j];
     return {m, t.position};
 }
 // Rejects shear and zero scale. Reflection is represented by a negative X scale.
@@ -133,7 +150,7 @@ template <floating T>
             return std::nullopt;
         m.set_column(j, m.column(j) / r.scale[j]);
     }
-    if (determinant(m) < T(0)) {
+    if (dot(m.column(0), cross(m.column(1), m.column(2))) < T(0)) {
         r.scale[0] = -r.scale[0];
         m.set_column(0, -m.column(0));
     }

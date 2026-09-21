@@ -158,3 +158,33 @@ CH_TEST(qr_least_squares_and_failures) {
         NEAR(e->values / scale, vec3d{2}, 1e-12);
     }
 }
+CH_TEST(symmetric_eigen_extreme_off_diagonal_ratios) {
+    // A tiny off-diagonal against a large diagonal difference drives the Jacobi
+    // tangent far outside the ordinary range; the hypot-based rotation must
+    // still converge and produce an orthonormal eigenbasis.
+    for (double off : {1e-14, 1e-10, 1e-3, 1e3}) {
+        auto a = mat3d{1};
+        a(0, 1) = a(1, 0) = off;
+        a(1, 1) = a(2, 2) = 2.0;
+        const auto e = symmetric_eigen(a, 1e-14, 64);
+        CHECK(e && e->converged);
+        for (std::size_t i = 0; i < 3; ++i)
+            NEAR(a * e->vectors.column(i), e->vectors.column(i) * e->values[i], 1e-10);
+        NEAR(transpose(e->vectors) * e->vectors, mat3d::identity(), 1e-12);
+        NEAR(dot(e->values, vec3d{1, 1, 1}), trace(a), 1e-12);
+    }
+}
+CH_TEST(decomposition_is_symmetric_within_tolerance_only) {
+    // The element-wise symmetry test must accept a mirrored pair that differs
+    // by less than the tolerance and reject one that differs by more.
+    auto near_symmetric = mat3d{2};
+    near_symmetric(0, 1) = 1e-9;
+    near_symmetric(1, 0) = -1e-9;
+    CHECK(cholesky(near_symmetric, 1e-6));
+    CHECK(symmetric_eigen(near_symmetric, 1e-6));
+    auto asymmetric = mat3d{2};
+    asymmetric(0, 1) = 1e-3;
+    asymmetric(1, 0) = -1e-3;
+    CHECK(!cholesky(asymmetric, 1e-6));
+    CHECK(!symmetric_eigen(asymmetric, 1e-6));
+}

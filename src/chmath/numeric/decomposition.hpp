@@ -15,9 +15,16 @@ template <floating T, std::size_t N>
         scale = std::max(scale, std::abs(v));
     if (scale == T(0))
         return std::nullopt;
-    if (!almost_equal(a / scale, transpose(a) / scale, tolerance, tolerance))
-        return std::nullopt;
+    // Normalize once. transpose(a/scale) is bit-identical to transpose(a)/scale
+    // because both divide the same element by the same scale, so sharing the
+    // scaled copy removes two full-matrix divisions and two stack temporaries.
+    // Symmetry is then checked element-wise, which also avoids materializing a
+    // transpose.
     const auto scaled = a / scale;
+    for (std::size_t i = 0; i < N; ++i)
+        for (std::size_t j = 0; j < i; ++j)
+            if (!detail::almost_equal_value(scaled(i, j), scaled(j, i), tolerance, tolerance))
+                return std::nullopt;
     mat<T, N, N> l;
     for (std::size_t i = 0; i < N; ++i)
         for (std::size_t j = 0; j <= i; ++j) {
@@ -133,9 +140,19 @@ symmetric_eigen(const mat<T, N, N> &input, T tolerance = epsilon<T>,
         return result;
     }
     auto a = input / scale;
-    if (!almost_equal(a, transpose(a), tolerance, tolerance))
-        return std::nullopt;
-    a = (a + transpose(a)) / T(2);
+    // Symmetry validation and symmetrization in one pass: element (i,j) of
+    // (a + transpose(a))/2 is (a(i,j) + a(j,i))/2, and checking the upper
+    // triangle against its mirror is exactly the almost_equal(a, transpose(a))
+    // test the general form would perform. This removes two full-matrix
+    // temporaries and passes.
+    for (std::size_t i = 0; i < N; ++i)
+        for (std::size_t j = i + 1; j < N; ++j) {
+            if (!detail::almost_equal_value(a(i, j), a(j, i), tolerance, tolerance))
+                return std::nullopt;
+            const T average = (a(i, j) + a(j, i)) / T(2);
+            a(i, j) = average;
+            a(j, i) = average;
+        }
     for (std::size_t sweep = 0; sweep <= max_sweeps; ++sweep) {
         T off{};
         for (std::size_t i = 0; i < N; ++i)
@@ -152,8 +169,13 @@ symmetric_eigen(const mat<T, N, N> &input, T tolerance = epsilon<T>,
                 const T apq = a(p, q);
                 if (std::abs(apq) <= tolerance)
                     continue;
-                const T theta = T(0.5) * std::atan2(T(2) * apq, a(q, q) - a(p, p)),
-                        c = std::cos(theta), s = std::sin(theta);
+                // Rotation angle from the Jacobi tangent formula: one hypot and
+                // one square root replace atan2 + cos + sin. hypot keeps the
+                // tangent finite for very large off-diagonal ratios.
+                const T theta = (a(q, q) - a(p, p)) / (T(2) * apq);
+                const T t = std::copysign(T(1), theta) /
+                            (std::abs(theta) + std::hypot(theta, T(1)));
+                const T c = T(1) / std::sqrt(T(1) + t * t), s = t * c;
                 const T app = a(p, p), aqq = a(q, q);
                 for (std::size_t k = 0; k < N; ++k)
                     if (k != p && k != q) {

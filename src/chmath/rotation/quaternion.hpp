@@ -47,8 +47,14 @@ template <floating T> [[nodiscard]] constexpr quat<T> operator/(const quat<T> &q
 }
 template <floating T>
 [[nodiscard]] constexpr quat<T> operator*(const quat<T> &a, const quat<T> &b) noexcept {
-    return {a.w() * b.imaginary() + b.w() * a.imaginary() + cross(a.imaginary(), b.imaginary()),
-            a.w() * b.w() - dot(a.imaginary(), b.imaginary())};
+    // Component form avoids constructing the imaginary vectors and the
+    // intermediate cross/dot results; each sum is ordered exactly like the
+    // vector expressions it replaces.
+    const T ax = a.x(), ay = a.y(), az = a.z(), aw = a.w();
+    const T bx = b.x(), by = b.y(), bz = b.z(), bw = b.w();
+    return {aw * bx + bw * ax + (ay * bz - az * by), aw * by + bw * ay + (az * bx - ax * bz),
+            aw * bz + bw * az + (ax * by - ay * bx),
+            aw * bw - (ax * bx + ay * by + az * bz)};
 }
 template <floating T> [[nodiscard]] constexpr T dot(const quat<T> &a, const quat<T> &b) noexcept {
     return dot(a.coefficients, b.coefficients);
@@ -84,10 +90,27 @@ template <floating T>
         return std::nullopt;
     return result;
 }
+
+namespace detail {
+// Internal: treat quaternions whose squared norm is within epsilon of one as
+// unit. normalize() still runs its full checks (and its scaling protection)
+// for everything else, including non-finite and zero input. Interpolation
+// renormalizes its result, so skipping a near-identity scaling is a change
+// bounded by the library's comparison tolerance.
+template <floating T> [[nodiscard]] inline quat<T> normalize_if_needed(quat<T> q) noexcept {
+    const T squared = dot(q, q);
+    return squared >= T(1) - epsilon<T> && squared <= T(1) + epsilon<T> ? q : normalize(q);
+}
+} // namespace detail
 template <floating T>
 [[nodiscard]] constexpr vec<T, 3> rotate(const quat<T> &q, const vec<T, 3> &v) noexcept {
-    const auto t = T(2) * cross(q.imaginary(), v);
-    return v + q.w() * t + cross(q.imaginary(), t);
+    // Expanded form without intermediate vectors; identical expression grouping
+    // to 2*cross(imaginary, v) followed by v + w*t + cross(imaginary, t).
+    const T qx = q.x(), qy = q.y(), qz = q.z(), qw = q.w();
+    const T tx = T(2) * (qy * v[2] - qz * v[1]), ty = T(2) * (qz * v[0] - qx * v[2]),
+            tz = T(2) * (qx * v[1] - qy * v[0]);
+    return {v[0] + qw * tx + (qy * tz - qz * ty), v[1] + qw * ty + (qz * tx - qx * tz),
+            v[2] + qw * tz + (qx * ty - qy * tx)};
 }
 template <floating T>
 [[nodiscard]] inline std::optional<quat<T>> from_axis_angle(const vec<T, 3> &axis,
@@ -102,7 +125,7 @@ template <floating T> struct axis_angle {
     T angle{};
 };
 template <floating T> [[nodiscard]] inline axis_angle<T> to_axis_angle(quat<T> q) noexcept {
-    q = normalize(q);
+    q = detail::normalize_if_needed(q);
     if (q.w() < T(0))
         q = -q;
     const T s = length(q.imaginary());
@@ -131,8 +154,17 @@ template <floating T>
                                                         T tolerance = T(4) * epsilon<T>) noexcept {
     if (!is_finite(m) || !is_finite(tolerance) || tolerance < T(0))
         return std::nullopt;
-    if (!almost_equal(transpose(m) * m, mat<T, 3, 3>::identity(), tolerance, tolerance) ||
-        !(dot(m.column(0), cross(m.column(1), m.column(2))) > T(0)))
+    // Element (i,j) of transpose(m)*m is exactly dot(column(i), column(j)), so
+    // checking the columns directly is the same test as comparing that product
+    // against the identity, without materializing the product.
+    const auto c0 = m.column(0), c1 = m.column(1), c2 = m.column(2);
+    if (!detail::almost_equal_value(dot(c0, c0), T(1), tolerance, tolerance) ||
+        !detail::almost_equal_value(dot(c1, c1), T(1), tolerance, tolerance) ||
+        !detail::almost_equal_value(dot(c2, c2), T(1), tolerance, tolerance) ||
+        !detail::almost_equal_value(dot(c0, c1), T(0), tolerance, tolerance) ||
+        !detail::almost_equal_value(dot(c0, c2), T(0), tolerance, tolerance) ||
+        !detail::almost_equal_value(dot(c1, c2), T(0), tolerance, tolerance) ||
+        !(dot(c0, cross(c1, c2)) > T(0)))
         return std::nullopt;
     quat<T> q;
     const T tr = trace(m);
@@ -155,15 +187,15 @@ template <floating T>
     return try_normalize(q);
 }
 template <floating T> [[nodiscard]] inline quat<T> nlerp(quat<T> a, quat<T> b, T t) noexcept {
-    a = normalize(a);
-    b = normalize(b);
+    a = detail::normalize_if_needed(a);
+    b = detail::normalize_if_needed(b);
     if (dot(a, b) < T(0))
         b = -b;
     return normalize(a * (T(1) - t) + b * t);
 }
 template <floating T> [[nodiscard]] inline quat<T> slerp(quat<T> a, quat<T> b, T t) noexcept {
-    a = normalize(a);
-    b = normalize(b);
+    a = detail::normalize_if_needed(a);
+    b = detail::normalize_if_needed(b);
     T d = dot(a, b);
     if (d < T(0)) {
         b = -b;
