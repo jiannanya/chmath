@@ -152,22 +152,27 @@ template <floating T>
     if (!a.valid() || !b.valid() || !is_finite(margin) || margin < T(0))
         return false;
     const auto delta = b.center - a.center;
+    // The six box axes are read once. The original form called column() inside
+    // the predicate, which rebuilt both axis sets for every one of the fifteen
+    // candidate axes.
+    const std::array<vec<T, 3>, 3> axes_a{a.axes.column(0), a.axes.column(1), a.axes.column(2)};
+    const std::array<vec<T, 3>, 3> axes_b{b.axes.column(0), b.axes.column(1), b.axes.column(2)};
     const auto separated = [&](const vec<T, 3> &axis) {
         const auto n = try_normalize(axis);
         if (!n)
             return false;
         T radius{};
         for (std::size_t i = 0; i < 3; ++i)
-            radius += a.half_extent[i] * std::abs(dot(a.axes.column(i), *n)) +
-                      b.half_extent[i] * std::abs(dot(b.axes.column(i), *n));
+            radius += a.half_extent[i] * std::abs(dot(axes_a[i], *n)) +
+                      b.half_extent[i] * std::abs(dot(axes_b[i], *n));
         return std::abs(dot(delta, *n)) > radius + margin;
     };
     for (std::size_t i = 0; i < 3; ++i)
-        if (separated(a.axes.column(i)) || separated(b.axes.column(i)))
+        if (separated(axes_a[i]) || separated(axes_b[i]))
             return false;
     for (std::size_t i = 0; i < 3; ++i)
         for (std::size_t j = 0; j < 3; ++j)
-            if (separated(cross(a.axes.column(i), b.axes.column(j))))
+            if (separated(cross(axes_a[i], axes_b[j])))
                 return false;
     return true;
 }

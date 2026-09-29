@@ -23,6 +23,17 @@ template <floating T, std::size_t N> struct curve_sample {
 
 template <floating T, std::size_t N, std::size_t Degree> struct bezier {
     std::array<vec<T, N>, Degree + 1> control{};
+    // Evaluation of an arbitrary control array of the same degree, without
+    // materialising an intermediate bezier. Callers that already own the control
+    // points (patches, derivative surfaces) skip one full copy of the row.
+    [[nodiscard]] static constexpr vec<T, N>
+    evaluate_control(const std::array<vec<T, N>, Degree + 1> &points, T t) noexcept {
+        auto work = points;
+        for (std::size_t k = Degree; k > 0; --k)
+            for (std::size_t i = 0; i < k; ++i)
+                work[i] = detail::lerp_finite(work[i], work[i + 1], t);
+        return work[0];
+    }
     [[nodiscard]] constexpr curve_sample<T, N> evaluate_with_derivative(T t) const noexcept {
         if constexpr (Degree == 0) {
             return {control[0], {}};
@@ -35,11 +46,7 @@ template <floating T, std::size_t N, std::size_t Degree> struct bezier {
         }
     }
     [[nodiscard]] constexpr vec<T, N> evaluate(T t) const noexcept {
-        auto work = control;
-        for (std::size_t k = Degree; k > 0; --k)
-            for (std::size_t i = 0; i < k; ++i)
-                work[i] = detail::lerp_finite(work[i], work[i + 1], t);
-        return work[0];
+        return evaluate_control(control, t);
     }
     [[nodiscard]] constexpr auto derivative() const noexcept
         requires(Degree > 0)
@@ -84,7 +91,7 @@ template <floating T, std::size_t N, std::size_t UDegree, std::size_t VDegree> s
     [[nodiscard]] constexpr vec<T, N> evaluate(T u, T v) const noexcept {
         bezier<T, N, VDegree> along_v;
         for (std::size_t j = 0; j <= VDegree; ++j)
-            along_v.control[j] = bezier<T, N, UDegree>{control[j]}.evaluate(u);
+            along_v.control[j] = bezier<T, N, UDegree>::evaluate_control(control[j], u);
         return along_v.evaluate(v);
     }
     [[nodiscard]] constexpr vec<T, N> derivative_u(T u, T v) const noexcept
@@ -100,7 +107,7 @@ template <floating T, std::size_t N, std::size_t UDegree, std::size_t VDegree> s
     {
         bezier<T, N, VDegree> along_v;
         for (std::size_t j = 0; j <= VDegree; ++j)
-            along_v.control[j] = bezier<T, N, UDegree>{control[j]}.evaluate(u);
+            along_v.control[j] = bezier<T, N, UDegree>::evaluate_control(control[j], u);
         return along_v.derivative().evaluate(v);
     }
 };

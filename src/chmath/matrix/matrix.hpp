@@ -255,9 +255,20 @@ template <floating T, std::size_t N> struct lu_factorization {
     template <std::size_t M>
     [[nodiscard]] constexpr mat<T, N, M> solve(const mat<T, N, M> &b) const noexcept {
         mat<T, N, M> x;
+        // Both the constant-evaluation test and the reciprocal-validity test are
+        // invariant over the (row, column) loops below, so they are resolved once
+        // per diagonal entry instead of once per back-substitution step. The
+        // chosen branch still reproduces the original expression exactly:
+        // multiplication by the reciprocal at run time, division whenever the
+        // reciprocal is not representable or the call is constant-evaluated.
+        std::array<T, N> diagonal{};
         std::array<T, N> reciprocal{};
-        for (std::size_t i = 0; i < N; ++i)
-            reciprocal[i] = std::is_constant_evaluated() ? T(0) : T(1) / factors(i, i);
+        std::array<bool, N> use_reciprocal{};
+        for (std::size_t i = 0; i < N; ++i) {
+            diagonal[i] = factors(i, i);
+            reciprocal[i] = std::is_constant_evaluated() ? T(0) : T(1) / diagonal[i];
+            use_reciprocal[i] = !std::is_constant_evaluated() && is_finite(reciprocal[i]);
+        }
         for (std::size_t col = 0; col < M; ++col) {
             for (std::size_t i = 0; i < N; ++i) {
                 T value = b(permutation[i], col);
@@ -265,13 +276,12 @@ template <floating T, std::size_t N> struct lu_factorization {
                     value -= factors(i, j) * x(j, col);
                 x(i, col) = value;
             }
+            T *xi = x.elements.data() + col * N;
             for (std::size_t i = N; i-- > 0;) {
-                T value = x(i, col);
+                T value = xi[i];
                 for (std::size_t j = i + 1; j < N; ++j)
-                    value -= factors(i, j) * x(j, col);
-                x(i, col) = std::is_constant_evaluated() || !is_finite(reciprocal[i])
-                                ? value / factors(i, i)
-                                : value * reciprocal[i];
+                    value -= factors(i, j) * xi[j];
+                xi[i] = use_reciprocal[i] ? value * reciprocal[i] : value / diagonal[i];
             }
         }
         return x;
@@ -330,15 +340,21 @@ factor_lu(const mat<T, N, N> &a, T tolerance = epsilon<T>) noexcept {
             std::swap(lu.permutation[k], lu.permutation[pivot]);
             lu.parity = -lu.parity;
         }
-        T reciprocal_pivot{};
-        if (!std::is_constant_evaluated())
-            reciprocal_pivot = T(1) / lu.factors(k, k);
+        const T diagonal = lu.factors(k, k);
+        const T reciprocal_pivot = std::is_constant_evaluated() ? T(0) : T(1) / diagonal;
+        // The division fallback is a property of the pivot alone: hoisting it,
+        // the multiplier and the pivot-column entry out of the update removes a
+        // reload per eliminated row and keeps factors(i, k) out of the FMA that
+        // overwrites it.
+        const bool divide = !is_finite(reciprocal_pivot) || std::is_constant_evaluated();
+        const T *pivot_row = lu.factors.data() + k;
         for (std::size_t i = k + 1; i < N; ++i) {
-            lu.factors(i, k) = std::is_constant_evaluated() || !is_finite(reciprocal_pivot)
-                                   ? lu.factors(i, k) / lu.factors(k, k)
-                                   : lu.factors(i, k) * reciprocal_pivot;
+            const T entry = lu.factors(i, k);
+            const T multiplier = divide ? entry / diagonal : entry * reciprocal_pivot;
+            lu.factors(i, k) = multiplier;
+            T *row = lu.factors.data() + i;
             for (std::size_t j = k + 1; j < N; ++j)
-                lu.factors(i, j) -= lu.factors(i, k) * lu.factors(k, j);
+                row[j * N] -= multiplier * pivot_row[j * N];
         }
     }
     if (!is_finite(lu.factors))

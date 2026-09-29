@@ -196,13 +196,15 @@ symmetric_eigen(const mat<T, N, N> &input, T tolerance = epsilon<T>,
     }
     for (std::size_t i = 0; i < N; ++i)
         result.values[i] = a(i, i) * scale;
+    // Ascending sort by exchanging the eigenvalue together with its eigenvector
+    // column element by element; the previous form rebuilt three column
+    // temporaries per exchange.
     for (std::size_t i = 0; i < N; ++i)
         for (std::size_t j = i + 1; j < N; ++j)
             if (result.values[j] < result.values[i]) {
                 std::swap(result.values[i], result.values[j]);
-                const auto v = result.vectors.column(i);
-                result.vectors.set_column(i, result.vectors.column(j));
-                result.vectors.set_column(j, v);
+                for (std::size_t k = 0; k < N; ++k)
+                    std::swap(result.vectors(k, i), result.vectors(k, j));
             }
     if (!is_finite(result.values))
         return std::nullopt;

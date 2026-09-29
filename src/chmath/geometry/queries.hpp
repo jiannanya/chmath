@@ -10,11 +10,18 @@ namespace chm {
 template <floating T, std::size_t N = 3> class prepared_ray {
     ray<T, N> ray_;
     vec<T, N> reciprocal_{};
+    // Whether a reciprocal is usable is a property of the direction alone and
+    // never changes between queries, so it is decided once here instead of on
+    // every interval endpoint. A non-finite reciprocal still falls back to the
+    // overflow-safe quotient.
+    std::array<bool, N> reciprocal_usable_{};
     explicit prepared_ray(const ray<T, N> &r) noexcept : ray_(r) {
-        for (std::size_t i = 0; i < N; ++i)
+        for (std::size_t i = 0; i < N; ++i) {
             // Parallel axes never use the reciprocal; keep the divisor nonzero
             // even under aggressive constant propagation.
             reciprocal_[i] = T(1) / (r.direction[i] == T(0) ? T(1) : r.direction[i]);
+            reciprocal_usable_[i] = is_finite(reciprocal_[i]);
+        }
     }
 
   public:
@@ -34,15 +41,16 @@ template <floating T, std::size_t N = 3> class prepared_ray {
                     return std::nullopt;
                 continue;
             }
-            const T dl = box.lower[i] - ray_.origin[i], dh = box.upper[i] - ray_.origin[i];
-            T a =
-                is_finite(dl) && is_finite(reciprocal_[i])
-                    ? dl * reciprocal_[i]
-                    : detail::difference_quotient(box.lower[i], ray_.origin[i], ray_.direction[i]);
-            T b =
-                is_finite(dh) && is_finite(reciprocal_[i])
-                    ? dh * reciprocal_[i]
-                    : detail::difference_quotient(box.upper[i], ray_.origin[i], ray_.direction[i]);
+            const T origin = ray_.origin[i], direction = ray_.direction[i];
+            const T dl = box.lower[i] - origin, dh = box.upper[i] - origin;
+            const bool usable = reciprocal_usable_[i];
+            const T inverse = reciprocal_[i];
+            T a = usable && is_finite(dl)
+                      ? dl * inverse
+                      : detail::difference_quotient(box.lower[i], origin, direction);
+            T b = usable && is_finite(dh)
+                      ? dh * inverse
+                      : detail::difference_quotient(box.upper[i], origin, direction);
             if (a > b)
                 std::swap(a, b);
             lo = std::max(lo, a);

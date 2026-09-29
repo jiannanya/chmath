@@ -195,3 +195,160 @@ ctest --test-dir build/parallel --output-on-failure
 ```
 
 本机数字来自单台 ARM64 macOS，未固定核心或频率；它们不代表 x86、MSVC 或其他负载。CI 新增 `parallel` 作业在 Ubuntu 上用 `CHMATH_ENABLE_PARALLEL=ON` 构建并运行完整套件，并冒烟运行并行基准，但不启用耗时阈值。
+
+## 2026-09-29 优化续作
+
+本轮继续对 LU 分解、包围盒相交、光线预准备与曲线求值做**可移植**优化：不使用任何 CPU 特异性内建函数或平台内联汇编，不新增编译期分支，全部改动都是标准 C++ 的表达式与循环重构。公共值类型的尺寸、对齐、ABI、错误处理语义、常量求值结果与核心零分配保证均未改变；`CHMATH_ENABLE_SIMD` 与 `CHMATH_ENABLE_PARALLEL` 的行为与默认值未变。
+
+### 环境与方法
+
+- 机器：Apple Silicon（macOS 26，`hw.ncpu=16`），Apple Clang 17.0.0，`-O3 -DNDEBUG`，`backend=NEON`。
+- A/B 方法：**把优化前/后的基准可执行文件分别保留，按 `base → new → base → new` 交错运行 7 轮**，取每项 7 个中位数的中位数再比较。交错采样抵消了机器负载与频率漂移——首轮未交错的测量中，未改动过的四元数负载也出现 13% 的假性回退，交错后回到 ±3% 噪声带内。
+- 单点微基准（`factor_lu` / `determinant`）在同一进程内交错运行，每项取 6–8 轮中位数；矩阵类负载 4096 项，批量负载沿用发行基准的 65536（扩展）与 1048576（并行）项。
+- 判定阈值：小于 3% 的差异不作为结论。
+
+### 优化点
+
+**1. LU 分解的消元内层（`chmath/matrix/matrix.hpp`）**
+
+原来的内层更新同时读写 `lu.factors(i, k)`，并对每个被消元行重新计算“是否需要用除法回退”。现在把该判定提升到每个主元一次，把主元列项、对角元与乘数都放进局部变量，内层改为指针索引：
+
+```cpp
+const bool divide = !is_finite(reciprocal_pivot) || std::is_constant_evaluated();
+const T *pivot_row = lu.factors.data() + k;
+for (std::size_t i = k + 1; i < N; ++i) {
+    const T entry = lu.factors(i, k);
+    const T multiplier = divide ? entry / diagonal : entry * reciprocal_pivot;
+    lu.factors(i, k) = multiplier;
+    T *row = lu.factors.data() + i;
+    for (std::size_t j = k + 1; j < N; ++j)
+        row[j * N] -= multiplier * pivot_row[j * N];
+}
+```
+
+乘数与对角元在寄存器中复用，内层的 FMA 不再与写入目标产生地址歧义。**算术与舍入顺序逐位保持**：`divide` 为假时仍是“乘倒数”，为真时仍是“除以对角元”。
+
+**2. 多右端回代的主元判定提升（`lu_factorization::solve`）**
+
+`std::is_constant_evaluated()` 与 `is_finite(reciprocal[i])` 对 (行, 列) 双循环是不变量，原来在每次回代时重算。现在每个对角元只解析一次，存入 `use_reciprocal[i]`，回代循环读表；同时把列基址 `x.elements.data() + col * N` 取出，回代只做线性索引。常量求值路径保持 `0` 倒数与除法分支，结果与原来一致。
+
+**3. 预准备光线的倒数可用性（`chmath/geometry/queries.hpp`）**
+
+`prepared_ray` 的意义是把方向倒数缓存起来以避免每次查询的除法，但原实现每次查询仍要重新判定 `is_finite(reciprocal_[i])`（每轴 2 次、共 6 次三比较链），因此它比未预准备的 `intersect(ray, aabb)` 还慢。倒数是否可用只取决于方向，与包围盒无关，现在在构造时算一次存入 `reciprocal_usable_`。**判定结果与原式完全相同**（`a && b` 与 `b && a` 对布尔等价，且 `reciprocal_` 构造后不再变化），非有限倒数仍回退到防溢出的商。
+
+**4. 定向包围盒分离轴：轴向量复用（`chmath/geometry/intersection.hpp`）**
+
+`separated` 谓词原来在内部调用 `a.axes.column(i)` / `b.axes.column(i)`，15 条候选轴每条都重建两组轴向量，共 24 次列构造。现在六个轴向量的列在进入循环前取一次。数值完全不变，只是不再重复复制 `vec<T,3>`。
+
+**5. 贝塞尔求值：去掉一次整行拷贝（`chmath/curves/curves.hpp`）**
+
+新增 `bezier::evaluate_control(points, t)` 静态入口，直接在调用方已有的控制点数组上做 de Casteljau。`bezier_patch::evaluate` 与 `derivative_v` 原来写 `bezier<T,N,UDegree>{control[j]}.evaluate(u)`——先聚合初始化一个临时 `bezier`（整行拷贝），`evaluate` 再拷贝一次到工作数组；现在只保留必需的一份工作拷贝。`bezier::evaluate` 也改为转调该入口，行为不变。
+
+**6. 对称特征分解的排序交换（`chmath/numeric/decomposition.hpp`）**
+
+按特征值升序排列时原来对每次交换构造 3 个列临时量（`column()` ×2 + `set_column()`）。现在直接按元素交换特征向量列，只是数据搬运的等价改写。
+
+### 微基准：LU 路径
+
+`probe_lu`，`double`，4096 项，同进程交错取中位数：
+
+| 运算 | 优化前 | 优化后 | 变化 |
+| --- | ---: | ---: | ---: |
+| `factor_lu<3,double>` | 12.9–13.2 | 12.0–12.1 | 约 −7% |
+| `factor_lu<4,double>` | 23.9–24.2 | 21.8 | 约 −9% |
+| `factor_lu` + `solve(I)` 4×4 | 46.1–46.6 | 38.5 | 约 −17% |
+| `determinant<4,double>` | 28.4–29.1 | 25.7–25.8 | 约 −11% |
+
+`micro` 单点基准把改动按文件拆分对照（`base` 全部回退 / `mat-only` 只含矩阵改动 / `all` 全部改动），用于区分真实收益与二进制布局噪声：
+
+| 运算 | base | 仅矩阵改动 | 全部改动 |
+| --- | ---: | ---: | ---: |
+| `mat4f inverse` | 40.15 | 34.75 | 35.08 |
+| `mat4d inverse` | 50.46 | 43.17 | 43.23 |
+| `mat4d determinant` | 28.83 | 25.36 | 25.10 |
+| `mat3d inverse` | 24.59 | 24.12 | 24.49 |
+| `prepared ray AABB` | 7.005 | 6.950 | 4.563 |
+| `quaternion from matrix` | 16.31 | 16.46 | 16.51 |
+
+`quaternion from matrix` 三项一致，说明早前观察到的“回退”只是二进制布局噪声；`prepared ray AABB` 的收益只出现在改动 `queries.hpp` 的 `all` 列，来源明确。
+
+### 发行基准：优化前后对比
+
+单位为 ns/项；同一个 `bin_base`/`bin_opt` 二进制对按 7 轮交错运行取中位数。仅列出变化超出噪声带的项：
+
+| 基准 | 优化前 | 优化后 | 变化 |
+| --- | ---: | ---: | ---: |
+| `chmath mat4 LU inverse`（核心基准） | 62.96 | 56.18 | **−10.8%** |
+| `mat4d inverse`（扩展基准） | 51.06 | 43.42 | **−15.0%** |
+| `mat3d inverse`（扩展基准） | 25.63 | 25.22 | −1.6% |
+| `prepared ray AABB queries [w=1]` | 15.10 | 11.09 | **−26.6%** |
+| `prepared ray AABB queries [w=16]` | 1.962 | 1.452 | **−26.0%** |
+| `SoA double transform [w=16]` | 0.229 | 0.218 | −4.4% |
+
+其余 27 项（SoA/AoS 变换、点积、归一化、四元数旋转/插值/矩阵转换、`rotation between`、mat2f/mat3f/mat4d 乘法、Bezier、ray AABB、frustum 分类等）变化在 ±3% 以内，判为无变化。**没有任何一项超出噪声带上界。**
+
+`prepared ray AABB` 在并行行同步改善，是因为每项计算变短后线程工作量下降；并行批处理的负载切分、worker 数量与线程创建策略未改动。
+
+### 内存占用
+
+- 公共值类型的布局与 ABI 逐位不变，发行基准仍报告 `sizeof(vec3f)=12 align=4 sizeof(mat4f)=64 sizeof(quatf)=16 sizeof(affine3f)=48`。
+- 静态断言（`tests/` 中的布局检查用例）继续通过。
+- `test_allocation` 仍报告核心接口 **0 次堆分配**；本轮新增的本地数组（`diagonal`、`use_reciprocal`、`reciprocal_usable_`、`axes_a/b`）全部是随对象或栈帧存在的定长 `std::array`，不引入分配。
+- 栈临时对象净减少：`bezier_patch` 每行少一次控制点整行拷贝，`symmetric_eigen` 每次排序交换少 3 个列临时量，`overlaps(obb,obb)` 每次调用少 18 次 `vec<T,3>` 构造。
+
+### 并发处理的测量结论
+
+本轮**未改动**并行实现，原因是测得的瓶颈不在切分或同步，而在平台线程创建成本。用同一台机器直接测量 `std::thread` 的创建 + join：
+
+| 线程数 | 总耗时 | 每线程 |
+| ---: | ---: | ---: |
+| 1 | 15.1–16.4 µs | 15–16 µs |
+| 4 | 37.8–40.5 µs | 9.5–10.1 µs |
+| 8 | 72.8–81.7 µs | 9.1–10.2 µs |
+| 15 | 124.4–143.5 µs | 8.3–9.6 µs |
+
+即每次并行调用约付出 15 µs 固定开销加约 9 µs/线程。1,048,576 项的 `SoA double transform` 串行约 887 µs、`[w=16]` 实测约 228 µs，其中约 145 µs 是线程开销，真正的计算只有约 85 µs（计算部分加速约 10×，端到端 3.9×）。因此该负载的端到端加速被线程创建主导，而 `SoA double dot` 同时受内存带宽限制（32 MB 数据 / 0.157 µs·项 ≈ 200 GB/s，已接近本机带宽）。
+
+消除该开销的唯一有效手段是复用线程池，但库明确承诺“并行调用不使用全局线程池，多个并发调用不共享隐藏状态”，`parallel_for` 还保证返回的 worker 数与 `parallel_workers(count, requested)` 一致（`tests/test_parallel.cpp` 逐项断言）。引入线程池会同时破坏这两条文档化保证，因此保持现设计不变：**并行路径的收益通过加快每个 worker 的内核来获得**（上表 `prepared ray AABB` 并行行 −26%），而不是改变切分策略。
+
+### 验证与回归
+
+所有配置均重新编译并运行完整 CTest 套件，**0 失败**：
+
+| 配置 | 全部测试 | 结果 |
+| --- | ---: | --- |
+| Release（SIMD ON，NEON 后端） | 1023/1023 | 通过 |
+| Debug | 1023/1023 | 通过 |
+| Release + `CHMATH_ENABLE_SIMD=OFF`（标量回退） | 1023/1023 | 通过 |
+| Release + `CHMATH_ENABLE_PARALLEL=ON` | 1023/1023 | 通过 |
+| Debug + ASan + UBSan（Clang） | 1023/1023 | 通过 |
+
+按标签单独执行：安全用例 **180/180**、压力用例 **60/60**、性能用例 **42/42**，全部通过。改动过的 5 个头文件都在 `chmath_header_checks` 的独立编译检查中（18 个头文件全部独立编译），`chmath_odr` 多翻译单元检查与安装消费测试同样通过。所有目标以 `-Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror` 编译，**无新增告警**；首版改动曾在 `factor_lu` 中触发 `-Wconstant-evaluated`（`std::is_constant_evaluated()` 作为 `bool` 变量初值），已通过调整 `||` 操作数顺序消除。
+
+正确性等价性依据（逐条对照原表达式，不依赖测试通过来推断）：
+
+| 改动 | 等价性论证 |
+| --- | --- |
+| `divide` 提升 | 两个操作数 (`reciprocal_pivot`, 常量求值标志) 在 `i` 循环内不变，`\|\|` 对布尔可交换 |
+| `multiplier`/`diagonal` | `diagonal` 是 `factors(k,k)` 的副本，`entry` 是 `factors(i,k)` 的一次读取 |
+| `row[j*N] -= ...` | `data()+i + j*N` 与 `factors(i,j)` 是同一地址 |
+| `use_reciprocal[i]` 表 | 每对角元一次求值，替换每次回代重复求值；常量求值时表项为假，走除法 |
+| `reciprocal_usable_` | 构造后 `reciprocal_` 不可变；`a && b` ≡ `b && a` |
+| `axes_a/b` 预取 | `column(j)` 是纯函数，复制值相同 |
+| `evaluate_control` | de Casteljau 的循环结构与 `evaluate` 原来完全一致，只是作用在传入数组上 |
+| 排序交换 | 纯数据搬运，`std::swap` 元素对与交换整列等价 |
+
+### 复现
+
+```sh
+cmake --preset release && cmake --build --preset release --parallel && ctest --preset release
+cmake --preset debug   && cmake --build --preset debug   --parallel && ctest --preset debug
+cmake --preset scalar  && cmake --build --preset scalar  --parallel && ctest --preset scalar
+cmake --preset parallel && cmake --build --preset parallel --parallel && ctest --preset parallel
+CXX=clang++ cmake --preset sanitize && cmake --build --preset sanitize --parallel && ctest --preset sanitize
+./build/release/chmath_bench 65536
+./build/release/chmath_bench_extended 65536
+./build/release/chmath_bench_parallel 1048576
+```
+
+结论：本轮在**未引入任何 CPU 特异性指令、平台内联汇编或新编译期分支**的前提下，把 4×4 double 求逆降低约 15%、4×4 float LU 求逆降低约 11%、预准备光线包围盒查询降低约 27%，并同步改善了这些负载的并行行；全部 5 种配置 1023 项测试 0 失败，ABI、常量求值语义与零堆分配保证不变。
