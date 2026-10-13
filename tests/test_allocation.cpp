@@ -89,6 +89,10 @@ int main() {
         const auto qr = factor_qr(model.linear());
         if (!qr)
             return 3;
+        const auto fitted = least_squares(model.linear(), vec3d{1, 2, 3});
+        if (!fitted)
+            return 3;
+        checksum += (*fitted)[0];
         const auto lu = factor_lu(model.linear());
         if (!lu)
             return 4;

@@ -22,6 +22,8 @@ jobs:
       - name: Audit 1000 compiled test cases
         run: python3 scripts/test_inventory.py --build-dir build/validate-${{ matrix.compiler }}-Release
       - run: python3 scripts/generate_extended_tests.py --check
+      - name: Smoke batch and decomposition benchmarks
+        run: ./build/validate-${{ matrix.compiler }}-Release/chmath_bench_hotspots 257
   windows:
     runs-on: windows-latest
     steps:
@@ -31,6 +33,8 @@ jobs:
       - run: ./scripts/validate.ps1 -Compiler clang++
       - run: python scripts/test_inventory.py --build-dir build/validate-cl-Release
       - run: python scripts/generate_extended_tests.py --check
+      - name: Smoke batch and decomposition benchmarks
+        run: ./build/validate-cl-Release/chmath_bench_hotspots.exe 257
   sanitizers:
     runs-on: ubuntu-latest
     steps:

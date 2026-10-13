@@ -21,6 +21,31 @@ template <floating T> struct soa3 {
     [[nodiscard]] const_soa3<T> as_const() const noexcept { return {x, y, z}; }
 };
 namespace detail {
+// Gather/scatter through the actual vec elements: never load a fourth component
+// from a compact vec3, or perform pointer arithmetic across adjacent objects.
+// Compilers can combine these fixed-size copies into interleaved loads/stores.
+template <floating T> struct aos3_packet {
+    using P = packet<T>;
+    typename P::value x, y, z;
+    [[nodiscard]] static aos3_packet load(const vec<T, 3> *input) noexcept {
+        T xs[P::lanes], ys[P::lanes], zs[P::lanes];
+        for (std::size_t lane = 0; lane < P::lanes; ++lane) {
+            xs[lane] = input[lane][0];
+            ys[lane] = input[lane][1];
+            zs[lane] = input[lane][2];
+        }
+        return {P::load(xs), P::load(ys), P::load(zs)};
+    }
+    void store(vec<T, 3> *output) const noexcept {
+        T xs[P::lanes], ys[P::lanes], zs[P::lanes];
+        P::store(xs, x);
+        P::store(ys, y);
+        P::store(zs, z);
+        for (std::size_t lane = 0; lane < P::lanes; ++lane)
+            output[lane] = {xs[lane], ys[lane], zs[lane]};
+    }
+};
+
 template <floating T>
 [[nodiscard]] inline bool valid_batch(const_soa3<T> in, soa3<T> out) noexcept {
     if (!in.valid() || !out.valid() || in.size() != out.size() || spans_overlap(out.x, out.y) ||
@@ -199,7 +224,25 @@ template <floating T>
                                             std::span<vec<T, 3>> output) noexcept {
     if (input.size() != output.size() || detail::unsafe_overlap(input, output))
         return false;
-    for (std::size_t i = 0; i < input.size(); ++i)
+    std::size_t i = 0;
+    using P = detail::packet<T>;
+    if constexpr (P::lanes > 1 && P::vector_sqrt)
+        for (; input.size() - i >= P::lanes; i += P::lanes) {
+            auto v = detail::aos3_packet<T>::load(input.data() + i);
+            const auto squared = P::add(P::add(P::mul(v.x, v.x), P::mul(v.y, v.y)),
+                                        P::mul(v.z, v.z));
+            if (P::normal_range(squared)) {
+                const auto reciprocal = P::div(P::splat(T(1)), P::sqrt(squared));
+                v.x = P::mul(v.x, reciprocal);
+                v.y = P::mul(v.y, reciprocal);
+                v.z = P::mul(v.z, reciprocal);
+                v.store(output.data() + i);
+            } else {
+                for (std::size_t lane = 0; lane < P::lanes; ++lane)
+                    output[i + lane] = normalize(input[i + lane]);
+            }
+        }
+    for (; i < input.size(); ++i)
         output[i] = normalize(input[i]);
     return true;
 }
@@ -331,6 +374,16 @@ template <floating T>
     if (input.size() != output.size() || detail::unsafe_overlap(input, output))
         return false;
     parallel_for(input.size(), workers, sizeof(vec<T, 3>), [&](std::size_t begin, std::size_t end) {
+        // Keep packet membership identical to the serial call, including when
+        // one extreme lane sends its packet through the scalar fallback. Shared
+        // boundaries round the same way, so the ranges still cover every item
+        // exactly once and only the last worker processes a scalar tail.
+        using P = detail::packet<T>;
+        if constexpr (P::lanes > 1 && P::vector_sqrt) {
+            begin -= begin % P::lanes;
+            if (end != input.size())
+                end -= end % P::lanes;
+        }
         (void)normalize_vectors(input.subspan(begin, end - begin),
                                 output.subspan(begin, end - begin));
     });

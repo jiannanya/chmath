@@ -18,6 +18,28 @@
 
 using namespace chm;
 
+template <floating T> void parallel_aos_normalization_packets() {
+    using V = vec<T, 3>;
+    const std::size_t count = parallel_min_chunk * 3U + 123U;
+    std::vector<V> input(count), serial(count), parallel(count);
+    for (auto &v : input)
+        v = {test::sample<T>(), test::sample<T>(), test::sample<T>()};
+    for (std::size_t i = 0; i < count; i += 17)
+        input[i] = i % 2 == 0 ? V{} : V{std::numeric_limits<T>::max()};
+    CHECK(normalize_vectors(std::span<const V>{input}, std::span<V>{serial}));
+    for (unsigned workers : {1U, 2U, 3U, 8U}) {
+        CHECK(normalize_vectors(std::span<const V>{input}, std::span<V>{parallel}, workers));
+        CHECK(parallel == serial);
+        parallel = input;
+        CHECK(normalize_vectors(std::span<const V>{parallel}, std::span<V>{parallel}, workers));
+        CHECK(parallel == serial);
+    }
+}
+CH_TEST(parallel_normalize_aos_mixed_packets) {
+    parallel_aos_normalization_packets<float>();
+    parallel_aos_normalization_packets<double>();
+}
+
 CH_TEST(parallel_configuration_is_reported) {
     const unsigned hardware = parallel_hardware_threads();
     CHECK(hardware >= 1U);

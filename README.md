@@ -8,7 +8,7 @@ A C++20 mathematics library for 3D rendering, game engines, and CAD applications
 
 The core uses compact, fixed-size value types, stack-allocated temporary storage, and explicit borrowing through `std::span`. Common aliases are provided for `float` and `double`. Vectors and matrices also support other arithmetic types; operations involving lengths, rotations, and decompositions require floating-point types. Batch operations for float/double and 4×4 float matrix multiplication can use SSE2 or NEON, with scalar fallbacks.
 
-The test suite contains **1019 independently named, individually runnable cases**, including **180 memory safety, 42 performance, and 60 stress cases**, plus heap allocation, installation, and linking checks. See the [validation report (Chinese)](docs/VALIDATION.md) for the test inventory and measured results.
+The test suite contains **1032 independently named, individually runnable cases**, including **185 memory safety, 42 performance, and 60 stress cases**, plus heap allocation, installation, and linking checks. See the [validation report (Chinese)](docs/VALIDATION.md) for the test inventory and measured results.
 
 ## Modules
 
@@ -98,6 +98,8 @@ Static assertions verify these layouts on conventional IEEE 754 platforms:
 
 The implementation uses compile-time dimensions, contiguous column access, small inlineable functions, and SoA / mat4f SIMD kernels, without reference counting or runtime dispatch. Mat4f multiplication uses the generic implementation during constant evaluation and unaligned SIMD loads at runtime, without increasing object size or alignment. Normalization uses a squared-norm fast path for ordinary values and retains scaling protection for very large or small inputs. LU shares row-scale and pivot reciprocals, resolves the division fallback once per pivot instead of once per eliminated row, and keeps the multiplier and pivot-column entry in locals; multiple-right-hand-side substitution resolves the reciprocal check once per diagonal entry. Neither change alters the arithmetic or its rounding order. A `prepared_ray` decides at construction time whether each cached direction reciprocal is usable, so queries no longer re-test it. Small matrix products, matrix–vector products, affine composition, and quaternion products keep their dot products in local accumulators; 4×4 float matrix–vector products share the SIMD backends used for matrix multiplication. Quaternion interpolation, matrix conversion, and rotation between vectors reuse intermediate results, and interpolation of already-unit quaternions skips a near-identity rescaling. Cholesky and symmetric eigendecomposition validate symmetry element-wise instead of materializing a transpose, the Jacobi rotation avoids trigonometric calls, `from_matrix` checks orthonormality directly on the columns, and `decompose` detects reflection with a triple product rather than an LU determinant. `overlaps(obb, obb)` reads both axis sets once, and `bezier_patch` evaluates control rows without an intermediate `bezier` copy. Cubic polynomial and prepared-ray interfaces let repeated queries share preparation work.
 
+AoS normalization also uses the existing packet backends, with stable scalar handling for exceptional values and tails. Compact vec3 loads stay within each object. SIMD and per-vector scalar rounding may differ in the last bits; parallel AoS normalization keeps the same packet groups as the serial batch to preserve identical results. LU updates for dimensions 16 and above and full QR accumulation traverse contiguous columns. Least-squares solves apply Householder reflectors directly to the right-hand side, avoiding a full Q matrix: workspace becomes O(R*C + R) and work becomes O(R*C*C) for R rows and C columns. Results remain subject to floating-point rounding; direct reflector application need not be bit-identical to explicitly forming Q. See the [2026-10-13 performance report](docs/PERFORMANCE-2026-10-13.md) for before/after measurements and platform validation.
+
 The library does not enable `fast-math`, globally target host-specific CPU instructions, or use approximate reciprocal square roots by default, preserving NaN/infinity and error-checking semantics. Matrix inversion uses pivoted LU to balance generality and numerical stability. Reuse a `factor_lu` result when solving repeatedly with the same matrix.
 
 SIMD paths preserve the ABI of public value types. Set `CHMATH_ENABLE_SIMD=OFF` in CMake to disable explicit SIMD; the compiler may still vectorize ordinary loops. Kernels are selected automatically on x86 with SSE2 and ARM toolchains supporting `__ARM_NEON`; other platforms use scalar implementations. Use consistent macro settings across translation units. Mixing different settings within one process is unsupported.
@@ -130,10 +132,13 @@ cmake --build --preset release --parallel
 ctest --preset release
 ./build/release/chmath_bench
 ./build/release/chmath_bench_extended
+./build/release/chmath_bench_hotspots
 ./build/release/chmath_bench_parallel
 ```
 
-On Windows, the benchmark executables are `build/release/chmath_bench.exe`, `chmath_bench_extended.exe`, and `chmath_bench_parallel.exe`. You can pass an item count, for example `chmath_bench 262144`. They report the median and range of nine samples after warmup. The ordinary SoA baseline is available for compiler optimization; automatic vectorization is not forcibly disabled. `chmath_bench_parallel` is always built with `CHMATH_ENABLE_PARALLEL=1` and compares each batch operation at `workers=1` with the hardware worker count.
+On Windows, the benchmark executables are `build/release/chmath_bench.exe`, `chmath_bench_extended.exe`, `chmath_bench_hotspots.exe`, and `chmath_bench_parallel.exe`. You can pass an item count, for example `chmath_bench 262144`. They report the median and range of nine samples after warmup. The ordinary SoA baseline is available for compiler optimization; automatic vectorization is not forcibly disabled. `chmath_bench_parallel` is always built with `CHMATH_ENABLE_PARALLEL=1` and compares each batch operation at `workers=1` with the hardware worker count.
+
+`chmath_bench_hotspots` covers float/double AoS normalization (including mixed extreme values), rectangular least squares, full QR, and larger LU factorizations. For alternating before/after process runs, use `python3 scripts/benchmark_ab.py BEFORE_EXECUTABLE AFTER_EXECUTABLE --repeats 7 --output-dir build/benchmark-ab`; this saves raw logs, environment metadata, and median comparisons. Use matching compiler flags and avoid other heavy workloads while measuring.
 
 Use the `parallel` preset (`cmake --preset parallel`) or `-DCHMATH_ENABLE_PARALLEL=ON` to compile the worker-count overloads of the batch entry points; see [Memory and performance](#memory-and-performance) for the exact guarantees.
 
@@ -160,7 +165,7 @@ python scripts/test_inventory.py --build-dir build/release --output build/test-i
 python scripts/generate_extended_tests.py --check
 ```
 
-The 180 memory safety cases check buffer contracts and use real guard pages through Windows `VirtualAlloc/VirtualProtect` or POSIX `mmap/mprotect`. They cover SIMD tails, read-only inputs, addresses without SIMD alignment, in-place operations, and rejection before writes. The 144 added cases cover float/double, six operations, and 12 lengths. Violations of documented caller preconditions, such as out-of-range indexing, are not exercised as valid inputs.
+The 185 memory safety cases check buffer contracts and use real guard pages through Windows `VirtualAlloc/VirtualProtect` or POSIX `mmap/mprotect`. They cover SIMD tails, read-only inputs, addresses without SIMD alignment, in-place operations, and rejection before writes. The 144 added cases cover float/double, six operations, and 12 lengths. Violations of documented caller preconditions, such as out-of-range indexing, are not exercised as valid inputs.
 
 The 60 stress cases cover repeated normalization, accumulated transforms, decomposition reuse, ray grids, spline sampling, batch pipelines, ill-conditioned matrices, oscillatory integration, and shared read-only data with 2/4/8 threads. Each type/workload has three tiers: 512, 4096, and 32768 work units. Integration performs one complete evaluation-budgeted integral per 128 units.
 

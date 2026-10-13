@@ -8,7 +8,7 @@
 
 核心采用固定大小的紧凑值类型、栈上临时存储和显式借用的 `std::span`。提供 `float` / `double` 常用别名；向量与矩阵也支持其他算术类型，涉及长度、旋转和分解的接口限浮点类型。float/double 批处理和 4×4 float 矩阵乘法可使用 SSE2 / NEON，并提供标量回退。
 
-测试套件包含 **1019 个独立命名、可单独运行的用例**，其中有 **180 个内存安全、42 个性能、60 个压力用例**，另有堆分配计数、安装与链接检查。测试清单和本机实测结果见 [验证报告](docs/VALIDATION.md)。
+测试套件包含 **1032 个独立命名、可单独运行的用例**，其中有 **185 个内存安全、42 个性能、60 个压力用例**，另有堆分配计数、安装与链接检查。测试清单和本机实测结果见 [验证报告](docs/VALIDATION.md)。
 
 ## 模块
 
@@ -100,6 +100,8 @@ target_link_libraries(your_target PRIVATE chm::chmath)
 
 默认不启用 `fast-math`、全局 CPU 本机专用指令或近似倒平方根，以保留 NaN / 无穷和错误检测语义。矩阵求逆选择带选主元的 LU，优先兼顾通用性和数值稳定性；同一矩阵反复求解可复用 `factor_lu` 结果。
 
+AoS 批量归一化同样使用现有 SIMD 后端，极值与尾部仍走稳定标量处理，紧凑 vec3 的加载不越过对象边界。SIMD 与逐向量标量计算可能存在末位舍入差异；并行 AoS 归一化保持与串行批量相同的分组，确保结果一致。16 阶及以上 LU 更新、完整 QR 累积改为按列连续访问。最小二乘直接将 Householder 反射作用于右端项，省去完整 Q：R 行 C 列问题的工作空间为 O(R*C + R)，运算量为 O(R*C*C)。直接反射与显式构造 Q 的浮点舍入可能不同。前后测量与平台验证见 [2026-10-13 性能报告](docs/PERFORMANCE-2026-10-13.md)。
+
 SIMD 路径不改变公共值类型 ABI。CMake 选项 `CHMATH_ENABLE_SIMD=OFF` 可关闭显式 SIMD；编译器仍可自动向量化普通循环。x86 SSE2 和支持 `__ARM_NEON` 的 ARM 工具链自动选择内核，其他平台执行标量实现。所有翻译单元应使用一致的宏设置；同一进程混用不同设置不受支持。
 
 批处理接受调用方提供的内存，不分配输出。允许完整原地操作，拒绝部分重叠；SoA 的输出通道必须互不重叠。变换参数本身不能与输出缓冲区重叠。失败返回 `false`，并在写入前完成尺寸与重叠检查。
@@ -130,10 +132,13 @@ cmake --build --preset release --parallel
 ctest --preset release
 ./build/release/chmath_bench
 ./build/release/chmath_bench_extended
+./build/release/chmath_bench_hotspots
 ./build/release/chmath_bench_parallel
 ```
 
-Windows 基准可执行文件为 `build/release/chmath_bench.exe`、`chmath_bench_extended.exe` 和 `chmath_bench_parallel.exe`。可传入点数，例如 `chmath_bench 262144`。它们输出预热后九组样本的中位数和范围，包含可被编译器优化的普通 SoA 基线，不把基线强制关闭自动向量化。`chmath_bench_parallel` 始终以 `CHMATH_ENABLE_PARALLEL=1` 构建，并对比同一批量在 `workers=1` 与硬件线程数下的耗时。
+`chmath_bench_hotspots` 覆盖 float/double AoS 归一化、混合极值、矩形最小二乘、完整 QR 和较大 LU。使用 `python3 scripts/benchmark_ab.py BEFORE_EXECUTABLE AFTER_EXECUTABLE --repeats 7 --output-dir build/benchmark-ab` 交错执行前后版本，保存原始日志、环境信息和中位数对比；应使用相同编译参数，并避免同时运行其他重负载。
+
+Windows 基准可执行文件为 `build/release/chmath_bench.exe`、`chmath_bench_extended.exe`、`chmath_bench_hotspots.exe` 和 `chmath_bench_parallel.exe`。可传入点数，例如 `chmath_bench 262144`。它们输出预热后九组样本的中位数和范围，包含可被编译器优化的普通 SoA 基线，不把基线强制关闭自动向量化。`chmath_bench_parallel` 始终以 `CHMATH_ENABLE_PARALLEL=1` 构建，并对比同一批量在 `workers=1` 与硬件线程数下的耗时。
 
 使用 `parallel` 预设（`cmake --preset parallel`）或 `-DCHMATH_ENABLE_PARALLEL=ON` 编译批处理入口的 workers 重载；具体保证见「内存与性能」一节。
 
@@ -160,7 +165,7 @@ python scripts/test_inventory.py --build-dir build/release --output build/test-i
 python scripts/generate_extended_tests.py --check
 ```
 
-180 条内存安全用例使用 Windows `VirtualAlloc/VirtualProtect` 或 POSIX `mmap/mprotect` 建立真实保护页并检查缓冲区契约，覆盖 SIMD 尾部、只读输入、非 SIMD 对齐地址、原地计算和失败前不写入。新增 144 条覆盖 float/double、六种操作、12 种长度。下标越界等已声明的调用方前提不会被当作合法输入执行。
+185 条内存安全用例使用 Windows `VirtualAlloc/VirtualProtect` 或 POSIX `mmap/mprotect` 建立真实保护页并检查缓冲区契约，覆盖 SIMD 尾部、只读输入、非 SIMD 对齐地址、原地计算和失败前不写入。新增 144 条覆盖 float/double、六种操作、12 种长度。下标越界等已声明的调用方前提不会被当作合法输入执行。
 
 60 条压力用例覆盖反复归一化、变换累积、分解复用、射线网格、样条采样、批处理流水线、病态矩阵、振荡积分和 2/4/8 线程共享只读数据。每种类型/负载有 512、4096、32768 工作单位的三个级别；积分每 128 单位执行一次有求值预算的完整积分。
 

@@ -49,6 +49,37 @@ struct qr_factorization {
     mat<T, R, R> q = mat<T, R, R>::identity();
     mat<T, R, C> r{};
 };
+namespace detail {
+// Apply each reflector to R and let the caller accumulate Q or transform a RHS.
+// The latter avoids the R-by-R workspace and O(R*R*C) work of forming full Q.
+template <floating T, std::size_t R, std::size_t C, class Apply>
+inline void householder_reduce(mat<T, R, C> &r, Apply apply) noexcept {
+    for (std::size_t k = 0; k < C; ++k) {
+        vec<T, R> v;
+        T scale{};
+        for (std::size_t i = k; i < R; ++i)
+            scale = std::max(scale, std::abs(r(i, k)));
+        if (scale == T(0))
+            continue;
+        for (std::size_t i = k; i < R; ++i)
+            v[i] = r(i, k) / scale;
+        const T norm = length(v);
+        v[k] += std::copysign(norm, v[k]);
+        v = normalize(v);
+        for (std::size_t j = k; j < C; ++j) {
+            T d{};
+            for (std::size_t i = k; i < R; ++i)
+                d += v[i] * r(i, j);
+            for (std::size_t i = k; i < R; ++i)
+                r(i, j) -= T(2) * v[i] * d;
+        }
+        apply(k, v);
+        for (std::size_t i = k + 1; i < R; ++i)
+            r(i, k) = T(0);
+    }
+}
+} // namespace detail
+
 // Householder QR. Full Q is appropriate for small fixed matrices; no heap workspace.
 template <floating T, std::size_t R, std::size_t C>
     requires(R >= C)
@@ -58,35 +89,27 @@ factor_qr(const mat<T, R, C> &a) noexcept {
         return std::nullopt;
     qr_factorization<T, R, C> result;
     result.r = a;
-    for (std::size_t k = 0; k < C; ++k) {
-        vec<T, R> v;
-        T scale{};
-        for (std::size_t i = k; i < R; ++i)
-            scale = std::max(scale, std::abs(result.r(i, k)));
-        if (scale == T(0))
-            continue;
-        for (std::size_t i = k; i < R; ++i)
-            v[i] = result.r(i, k) / scale;
-        const T norm = length(v);
-        v[k] += std::copysign(norm, v[k]);
-        v = normalize(v);
-        for (std::size_t j = k; j < C; ++j) {
-            T d{};
-            for (std::size_t i = k; i < R; ++i)
-                d += v[i] * result.r(i, j);
-            for (std::size_t i = k; i < R; ++i)
-                result.r(i, j) -= T(2) * v[i] * d;
-        }
-        for (std::size_t i = 0; i < R; ++i) {
-            T d{};
+    detail::householder_reduce(result.r, [&](std::size_t k, const vec<T, R> &v) {
+        if constexpr (R <= 4) {
+            for (std::size_t i = 0; i < R; ++i) {
+                T d{};
+                for (std::size_t j = k; j < R; ++j)
+                    d += result.q(i, j) * v[j];
+                for (std::size_t j = k; j < R; ++j)
+                    result.q(i, j) -= T(2) * d * v[j];
+            }
+        } else {
+            // Traverse column-major Q contiguously. Each row retains the same
+            // accumulation order, while independent rows can be vectorized.
+            vec<T, R> d;
             for (std::size_t j = k; j < R; ++j)
-                d += result.q(i, j) * v[j];
+                for (std::size_t i = 0; i < R; ++i)
+                    d[i] += result.q(i, j) * v[j];
             for (std::size_t j = k; j < R; ++j)
-                result.q(i, j) -= T(2) * d * v[j];
+                for (std::size_t i = 0; i < R; ++i)
+                    result.q(i, j) -= T(2) * d[i] * v[j];
         }
-        for (std::size_t i = k + 1; i < R; ++i)
-            result.r(i, k) = T(0);
-    }
+    });
     if (!is_finite(result.q) || !is_finite(result.r))
         return std::nullopt;
     return result;
@@ -95,12 +118,33 @@ template <floating T, std::size_t R, std::size_t C>
     requires(R >= C)
 [[nodiscard]] inline std::optional<vec<T, C>>
 least_squares(const mat<T, R, C> &a, const vec<T, R> &b, T tolerance = epsilon<T>) noexcept {
-    if (!is_finite(b) || !is_finite(tolerance) || tolerance < T(0))
+    if (!is_finite(a) || !is_finite(b) || !is_finite(tolerance) || tolerance < T(0))
         return std::nullopt;
-    const auto qr = factor_qr(a);
-    if (!qr)
+    auto r = a;
+    auto rhs = b;
+    detail::householder_reduce(r, [&](std::size_t k, const vec<T, R> &v) {
+        T d{};
+        for (std::size_t i = k; i < R; ++i)
+            d += v[i] * rhs[i];
+        if (!is_finite(d)) {
+            // A projection can overflow even when the reflected RHS is finite.
+            T rhs_scale{};
+            for (std::size_t i = k; i < R; ++i)
+                rhs_scale = std::max(rhs_scale, std::abs(rhs[i]));
+            d = T(0);
+            for (std::size_t i = k; i < R; ++i)
+                d += v[i] * (rhs[i] / rhs_scale);
+            for (std::size_t i = k; i < R; ++i)
+                rhs[i] = (rhs[i] / rhs_scale - T(2) * v[i] * d) * rhs_scale;
+        } else {
+            for (std::size_t i = k; i < R; ++i) {
+                const T value = rhs[i] - T(2) * v[i] * d;
+                rhs[i] = is_finite(value) ? value : (rhs[i] / T(2) - v[i] * d) * T(2);
+            }
+        }
+    });
+    if (!is_finite(r))
         return std::nullopt;
-    const auto rhs = transpose(qr->q) * b;
     vec<T, C> x;
     T scale{};
     for (T v : a.elements)
@@ -108,12 +152,12 @@ least_squares(const mat<T, R, C> &a, const vec<T, R> &b, T tolerance = epsilon<T
     if (scale == T(0))
         return std::nullopt;
     for (std::size_t i = C; i-- > 0;) {
-        if (std::abs(qr->r(i, i)) / scale <= tolerance)
+        if (std::abs(r(i, i)) / scale <= tolerance)
             return std::nullopt;
         x[i] = rhs[i];
         for (std::size_t j = i + 1; j < C; ++j)
-            x[i] -= qr->r(i, j) * x[j];
-        x[i] /= qr->r(i, i);
+            x[i] -= r(i, j) * x[j];
+        x[i] /= r(i, i);
     }
     if (!is_finite(x))
         return std::nullopt;

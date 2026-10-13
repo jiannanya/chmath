@@ -52,7 +52,7 @@ if (lu) {
 | `determinant(A)` | 默认不截断小主元；对中间上溢/下溢采用指数缩放重算；非有限输入返回 NaN，最终结果仍可能超出表示范围 |
 | `cholesky(A,tolerance)` | 对称正定矩阵的下三角 L，满足 `A=L*transpose(L)` |
 | `factor_qr(A)` | R≥C，返回完整正交 Q 与上梯形 R；Householder 算法，允许秩亏 |
-| `least_squares(A,b,tolerance)` | R≥C，QR 回代求最小二乘；要求满列秩，不返回秩亏伪逆 |
+| `least_squares(A,b,tolerance)` | R≥C，Householder 直接变换右端项后回代，不构造完整 Q；工作空间 O(R*C+R)，要求满列秩，不返回秩亏伪逆 |
 | `symmetric_eigen(A,tolerance,max_sweeps)` | Jacobi 迭代；升序特征值、列特征向量、sweeps、converged |
 
 特征向量的符号不唯一，重复特征值的基也不唯一，不应按分量精确比较。特征分解与迭代求根/积分需要同时检查返回值和 `converged`。

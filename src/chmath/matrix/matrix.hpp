@@ -352,9 +352,23 @@ factor_lu(const mat<T, N, N> &a, T tolerance = epsilon<T>) noexcept {
             const T entry = lu.factors(i, k);
             const T multiplier = divide ? entry / diagonal : entry * reciprocal_pivot;
             lu.factors(i, k) = multiplier;
-            T *row = lu.factors.data() + i;
-            for (std::size_t j = k + 1; j < N; ++j)
-                row[j * N] -= multiplier * pivot_row[j * N];
+            // Small fixed matrices benefit from keeping each multiplier local;
+            // larger ones amortize the separate pass with contiguous updates.
+            if constexpr (N < 16) {
+                T *row = lu.factors.data() + i;
+                for (std::size_t j = k + 1; j < N; ++j)
+                    row[j * N] -= multiplier * pivot_row[j * N];
+            }
+        }
+        if constexpr (N >= 16) {
+            // All multipliers depend only on the pivot column. Apply them one
+            // contiguous column at a time without changing per-element order.
+            for (std::size_t j = k + 1; j < N; ++j) {
+                T *column = lu.factors.data() + j * N;
+                const T pivot_entry = pivot_row[j * N];
+                for (std::size_t i = k + 1; i < N; ++i)
+                    column[i] -= lu.factors(i, k) * pivot_entry;
+            }
         }
     }
     if (!is_finite(lu.factors))
